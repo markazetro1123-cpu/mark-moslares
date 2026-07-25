@@ -6,8 +6,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.30"
-#property description "Boom Spike-Counter v1.3: Green→Red SELL + 3 BuyStops counter + BUY exit on Red"
+#property version   "1.31"
+#property description "Boom Spike-Counter v1.31: BuyStop fill fix + chart slippage realism"
 
 #include <Trade/Trade.mqh>
 
@@ -29,10 +29,15 @@ input group "=== SELL / Counter ==="
 input int               BuyStopCount    = 3;
 input double            SL_Buffer       = 0.20;
 
+input group "=== Slippage / Tester realism ==="
+input int               SlippagePoints  = 50;    // Max deviation (points) — match noisy live fills
+input bool              InpUseChartSpread = true; // Log/use current chart spread
+input int               InpSpreadFloorPts = 0;    // Extra spread floor in points (0=off)
+input double            InpEntrySlipPrice = 0.0;  // Extra adverse price slip on market SELL (price units)
+
 input group "=== Retry / Broker ==="
 input int               MaxRetries      = 3;
 input int               RetryDelayMs    = 300;
-input int               DeviationPoints = 30;
 
 //======================================================================
 // STATE MACHINE (spec §3)
@@ -70,6 +75,8 @@ datetime        g_lastSellSignalBar   = 0;
 datetime        g_lastBuyExitBar      = 0;
 datetime        g_lastEarlyExitBar    = 0;
 datetime        g_lastCycleResultBar  = 0;
+datetime        g_waitBuyFillSince    = 0;   // SELL closed, waiting BuyStop fills
+bool            g_waitingBuyFill      = false;
 
 //======================================================================
 // FORWARD DECLS
@@ -110,6 +117,10 @@ double          BSC_EmergencyLossPct(const double equity);
 bool            BSC_CheckEmergency();
 void            BSC_TrailSharedLevel();
 bool            BSC_OpenSellWithSL(const double sl, const double lot, ulong &ticketOut);
+void            BSC_ActivateBuyMode();
+bool            BSC_TryActivateBuyFromPendings();
+double          BSC_EffectiveSpreadPrice();
+double          BSC_BuyStopTriggerPrice();
 
 //======================================================================
 // ONINIT / ONDEINIT / ONTICK
@@ -137,6 +148,8 @@ int OnInit()
 
    g_currentLot = StartLot;
    ArrayResize(g_buyStopTickets, 0);
+   g_waitingBuyFill = false;
+   g_waitBuyFillSince = 0;
 
    ENUM_ORDER_TYPE_FILLING fill = ORDER_FILLING_IOC;
    const int modes = (int)SymbolInfoInteger(g_symbol, SYMBOL_FILLING_MODE);
@@ -145,16 +158,16 @@ int OnInit()
    else                                                         fill = ORDER_FILLING_RETURN;
 
    g_trade.SetExpertMagicNumber(MagicNumber);
-   g_trade.SetDeviationInPoints(DeviationPoints);
+   // Slippage / deviation — higher = closer to messy live fills in tester
+   g_trade.SetDeviationInPoints(SlippagePoints);
    g_trade.SetTypeFilling(fill);
    g_trade.SetAsyncMode(false);
 
    BSC_RecoverState();
 
-   PrintFormat("BSC v1.3 ready | symbol=%s tf=%s magic=%s lot=%.2f state=%d | volMin=%.2f volMax=%.2f",
-               g_symbol, EnumToString(g_tf), IntegerToString(MagicNumber), g_currentLot, (int)g_state,
-               SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN),
-               SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MAX));
+   PrintFormat("BSC v1.31 ready | symbol=%s tf=%s magic=%s lot=%.2f slipPts=%d entrySlip=%.5f spread~%.5f",
+               g_symbol, EnumToString(g_tf), IntegerToString(MagicNumber), g_currentLot,
+               SlippagePoints, InpEntrySlipPrice, BSC_EffectiveSpreadPrice());
    return INIT_SUCCEEDED;
 }
 
@@ -175,8 +188,15 @@ void OnTick()
    // Keep TF synced if user uses PERIOD_CURRENT
    g_tf = BSC_ResolveTF();
 
+   // Keep deviation synced (tester/live)
+   g_trade.SetDeviationInPoints(SlippagePoints);
+
    if(BSC_CheckEmergency())
       return;
+
+   // Global safety: if BUY positions exist, always prefer BUY mode
+   if(g_state != BUY_ACTIVE && BSC_CountPositions(POSITION_TYPE_BUY) > 0)
+      BSC_ActivateBuyMode();
 
    switch(g_state)
    {
@@ -184,6 +204,34 @@ void OnTick()
       case SELL_ACTIVE:     BSC_OnSellActive();    break;
       case BUY_ACTIVE:      BSC_OnBuyActive();     break;
       case RESETTING:       BSC_ResetEngine();     break;
+   }
+}
+
+// Catch BuyStop fills instantly (tester + live)
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
+      return;
+   if(trans.symbol != g_symbol)
+      return;
+
+   // Deal magic check via history
+   if(!HistoryDealSelect(trans.deal))
+      return;
+   if((long)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != MagicNumber)
+      return;
+
+   const long dealType = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+   if(dealType == DEAL_TYPE_BUY)
+   {
+      const long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_IN || entry == DEAL_ENTRY_INOUT)
+      {
+         Print("BSC OnTradeTransaction: BUY deal detected → activate BUY mode");
+         BSC_ActivateBuyMode();
+      }
    }
 }
 
@@ -222,6 +270,71 @@ double BSC_Point()
 {
    const double p = SymbolInfoDouble(g_symbol, SYMBOL_POINT);
    return (p > 0.0 ? p : _Point);
+}
+
+double BSC_EffectiveSpreadPrice()
+{
+   double spread = SymbolInfoDouble(g_symbol, SYMBOL_ASK) - SymbolInfoDouble(g_symbol, SYMBOL_BID);
+   if(!InpUseChartSpread)
+      spread = 0.0;
+   if(InpSpreadFloorPts > 0)
+   {
+      const double floorPx = InpSpreadFloorPts * BSC_Point();
+      if(spread < floorPx)
+         spread = floorPx;
+   }
+   return MathMax(0.0, spread);
+}
+
+double BSC_BuyStopTriggerPrice()
+{
+   // Lowest BuyStop price (all should be same level)
+   double px = g_sharedLevel;
+   for(int i = OrdersTotal() - 1; i >= 0; --i)
+   {
+      const ulong t = OrderGetTicket(i);
+      if(t == 0 || !OrderSelect(t)) continue;
+      if(OrderGetString(ORDER_SYMBOL) != g_symbol) continue;
+      if(OrderGetInteger(ORDER_MAGIC) != MagicNumber) continue;
+      if(OrderGetInteger(ORDER_TYPE) != ORDER_TYPE_BUY_STOP) continue;
+      const double op = OrderGetDouble(ORDER_PRICE_OPEN);
+      if(px <= 0.0 || op < px)
+         px = op;
+   }
+   return px;
+}
+
+void BSC_ActivateBuyMode()
+{
+   // Close remaining SELL, delete unfilled BuyStops, switch
+   if(BSC_CountPositions(POSITION_TYPE_SELL) > 0)
+   {
+      BSC_CloseAllByType(POSITION_TYPE_SELL);
+      for(int r = 0; r < MaxRetries && BSC_CountPositions(POSITION_TYPE_SELL) > 0; ++r)
+      {
+         BSC_CloseAllByType(POSITION_TYPE_SELL);
+         BSC_RetrySleep();
+      }
+   }
+   BSC_DeleteBuyStops();
+   g_sellTicket = 0;
+   g_waitingBuyFill = false;
+   g_waitBuyFillSince = 0;
+   if(BSC_CountPositions(POSITION_TYPE_BUY) > 0)
+   {
+      BSC_SetState(BUY_ACTIVE);
+      Print("BSC switch → BUY_ACTIVE (buys=", BSC_CountPositions(POSITION_TYPE_BUY), ")");
+   }
+}
+
+bool BSC_TryActivateBuyFromPendings()
+{
+   if(BSC_CountPositions(POSITION_TYPE_BUY) > 0)
+   {
+      BSC_ActivateBuyMode();
+      return true;
+   }
+   return false;
 }
 
 int BSC_Digits()
@@ -643,6 +756,8 @@ void BSC_ResetEngine()
    g_cycleStartBal = 0.0;
    g_cycleStartEq = 0.0;
    g_emergencyFlag = false;
+   g_waitingBuyFill = false;
+   g_waitBuyFillSince = 0;
    // keep g_cycleResultDone true until new cycle starts
    BSC_SetState(WAIT_SELL_SETUP);
    Print("BSC RESET → WAIT_SELL_SETUP");
@@ -664,7 +779,15 @@ bool BSC_OpenSellWithSL(const double sl, const double lot, ulong &ticketOut)
          return false;
       }
 
-      if(!g_trade.Sell(lot, g_symbol, 0.0, validSL, 0.0, "BSC SELL"))
+      // Adverse slippage for SELL = fill at lower price (worse). 0 = market.
+      double entryPx = 0.0;
+      if(InpEntrySlipPrice > 0.0)
+         entryPx = BSC_NormPrice(bid - InpEntrySlipPrice - BSC_EffectiveSpreadPrice() * 0.0);
+
+      PrintFormat("BSC SELL send lot=%.2f bid=%.5f entryPx=%.5f slipPts=%d spread=%.5f SL=%.5f",
+                  lot, bid, entryPx, SlippagePoints, BSC_EffectiveSpreadPrice(), validSL);
+
+      if(!g_trade.Sell(lot, g_symbol, entryPx, validSL, 0.0, "BSC SELL"))
       {
          Print("BSC SELL open fail: ", g_trade.ResultRetcodeDescription());
          BSC_RetrySleep();
@@ -910,35 +1033,76 @@ void BSC_TrailSharedLevel()
 void BSC_OnSellActive()
 {
    // Priority: BuyStop trigger → BUY positions
-   const int buys = BSC_CountPositions(POSITION_TYPE_BUY);
-   if(buys > 0)
-   {
-      Print("BSC BUY STOP TRIGGERED — buys=", buys);
-      BSC_CloseAllByType(POSITION_TYPE_SELL);
-      // Retry until SELL count zero
-      for(int r = 0; r < MaxRetries && BSC_CountPositions(POSITION_TYPE_SELL) > 0; ++r)
-      {
-         BSC_CloseAllByType(POSITION_TYPE_SELL);
-         BSC_RetrySleep();
-      }
-      BSC_DeleteBuyStops();
-      g_sellTicket = 0;
-      BSC_SetState(BUY_ACTIVE);
-      Print("BSC switch → BUY_ACTIVE");
+   if(BSC_TryActivateBuyFromPendings())
       return;
-   }
 
-   // If SELL disappeared without BUY (SL hit / manual / early already handled)
-   if(BSC_CountPositions(POSITION_TYPE_SELL) == 0)
+   const int sellCount = BSC_CountPositions(POSITION_TYPE_SELL);
+   const int buyStops  = BSC_CountPendings(ORDER_TYPE_BUY_STOP);
+
+   // FIX: SELL closed by SL at shared level — DO NOT delete BuyStops.
+   // Wait for BuyStops to fill (this was why BUY never entered).
+   if(sellCount == 0)
    {
-      Print("BSC SELL flat with no BUY → reset");
-      BSC_DeleteBuyStops();
+      if(buyStops > 0)
+      {
+         if(!g_waitingBuyFill)
+         {
+            g_waitingBuyFill = true;
+            g_waitBuyFillSince = TimeCurrent();
+            PrintFormat("BSC SELL flat but %d BuyStop(s) live @ %.5f — WAITING for BUY fill (no delete)",
+                        buyStops, BSC_BuyStopTriggerPrice());
+         }
+
+         // If Ask already through BuyStop level, keep waiting a bit for tester/broker fill
+         const double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
+         const double trig = BSC_BuyStopTriggerPrice();
+         if(trig > 0.0 && ask + BSC_Point() >= trig)
+         {
+            // Still no BUY position: some testers delay pending fill one tick
+            if(BSC_TryActivateBuyFromPendings())
+               return;
+            // Soft timeout 15s while price is through level
+            if(g_waitBuyFillSince > 0 && (TimeCurrent() - g_waitBuyFillSince) > 15)
+            {
+               Print("BSC WARN: Ask through BuyStop but no BUY fill after 15s — keep waiting one more cycle");
+               g_waitBuyFillSince = TimeCurrent(); // extend once; don't delete yet
+            }
+            return;
+         }
+
+         // Price fell back far below trigger without filling → abandoned spike
+         if(trig > 0.0 && ask < (trig - MathMax(SL_Buffer * 2.0, BSC_StopsDist() * 2.0)))
+         {
+            PrintFormat("BSC BuyStops abandoned (ask=%.5f << trig=%.5f) → reset", ask, trig);
+            BSC_DeleteBuyStops();
+            g_waitingBuyFill = false;
+            BSC_SetState(RESETTING);
+            return;
+         }
+
+         // Hard timeout 120s
+         if(g_waitBuyFillSince > 0 && (TimeCurrent() - g_waitBuyFillSince) > 120)
+         {
+            Print("BSC BuyStop wait timeout 120s → reset");
+            BSC_DeleteBuyStops();
+            g_waitingBuyFill = false;
+            BSC_SetState(RESETTING);
+         }
+         return;
+      }
+
+      // Truly flat — no SELL, no BUY, no BuyStops
+      Print("BSC SELL flat with no BUY/BuyStops → reset");
+      g_waitingBuyFill = false;
       BSC_SetState(RESETTING);
       return;
    }
 
+   g_waitingBuyFill = false;
+
    // Early Green overlap exit (intrabar) — forming candle shift 0
    // Current forming Green AND Bid >= previous Red Open (shift 1)
+   // Only if BuyStops have NOT been triggered (still SELL path, no spike fill)
    if(BSC_IsGreen(0))
    {
       const double prevRedOpen = BSC_Open(1);
@@ -946,19 +1110,28 @@ void BSC_OnSellActive()
       const datetime curBar = BSC_BarTime(0);
       if(bid >= prevRedOpen && curBar != g_lastEarlyExitBar)
       {
-         PrintFormat("BSC EARLY GREEN OVERLAP bid=%.5f redOpen=%.5f — close SELL",
-                     bid, prevRedOpen);
-         g_lastEarlyExitBar = curBar;
-         BSC_CloseAllByType(POSITION_TYPE_SELL);
-         for(int r = 0; r < MaxRetries && BSC_CountPositions(POSITION_TYPE_SELL) > 0; ++r)
+         // If price already reached shared BuyStop/SL level, treat as spike path — don't kill BuyStops
+         const double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
+         if(g_sharedLevel > 0.0 && ask >= g_sharedLevel - BSC_Point())
          {
-            BSC_CloseAllByType(POSITION_TYPE_SELL);
-            BSC_RetrySleep();
+            Print("BSC overlap near sharedLevel — prefer BuyStop fill path, skip early-delete");
          }
-         // Do not accumulate obsolete BuyStops — delete before next setup
-         BSC_DeleteBuyStops();
-         BSC_SetState(RESETTING);
-         return;
+         else
+         {
+            PrintFormat("BSC EARLY GREEN OVERLAP bid=%.5f redOpen=%.5f — close SELL",
+                        bid, prevRedOpen);
+            g_lastEarlyExitBar = curBar;
+            BSC_CloseAllByType(POSITION_TYPE_SELL);
+            for(int r = 0; r < MaxRetries && BSC_CountPositions(POSITION_TYPE_SELL) > 0; ++r)
+            {
+               BSC_CloseAllByType(POSITION_TYPE_SELL);
+               BSC_RetrySleep();
+            }
+            // Early exit (not spike counter fill): delete BuyStops
+            BSC_DeleteBuyStops();
+            BSC_SetState(RESETTING);
+            return;
+         }
       }
    }
 
