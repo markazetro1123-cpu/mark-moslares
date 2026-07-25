@@ -1,46 +1,30 @@
-# CandleBiasScalper — MT5 EA
+# CandleBiasScalper — MT5 EA (single file)
 
-Candle-bias one-way trailing pending scalper for **XAUUSD** and **US30**.  
-Works on **any timeframe** (chart TF = EA TF). Built for Deriv / Tickmill compatibility.
-
-## Strategy (locked)
-
-1. Bias from candle Open: below = SELL priority, above = BUY priority  
-2. Arm only after `BufferDistance` from Open  
-3. BUY stop above price (trail **down only**), SELL stop below price (trail **up only**)  
-4. Priority + counter pending; **1 open position** max with flip  
-5. Secure profit floor then trail for more  
-6. Smart risk: start **50%** room, **-5% per equity tier**, dynamic lot growth  
-
-## Install
-
-1. Copy:
-   - `MQL5/Experts/EA_CandleBiasScalper.mq5` → MT5 `MQL5/Experts/`
-   - `MQL5/Include/CBR_Utils.mqh` → `MQL5/Include/`
-   - `MQL5/Include/CBR_Risk.mqh` → `MQL5/Include/`
-2. Compile in MetaEditor (F7)
-3. Attach to XAUUSD or US30 chart (any TF)
-4. Enable **Algo Trading**
-
-## Core inputs
-
-| Input | Default | Meaning |
-|-------|---------|---------|
-| `InpBufferDistance` | 1.0 | Distance from open before arming |
-| `InpPendingOffset` | 0.2 | Pending gap from current price |
-| `InpSecureProfit` | 0.2 | Secure floor |
-| `InpTrailDistance` | 0.1 | Trail gap from current price |
-| `InpEmergencyStopDist` | 5.0 | Emergency SL distance |
-| `InpUseSmartRisk` | true | Tiered lot/risk manager |
-
-## Files
+Isang file lang kailangan i-copy:
 
 ```
 MQL5/Experts/EA_CandleBiasScalper.mq5
-MQL5/Include/CBR_Utils.mqh
-MQL5/Include/CBR_Risk.mqh
 ```
+
+## Install
+
+1. MT5 → **File → Open Data Folder**
+2. Copy `EA_CandleBiasScalper.mq5` → `MQL5/Experts/`
+3. MetaEditor → open file → **Compile (F7)**
+4. Attach sa XAUUSD o US30 chart (any TF)
+5. Enable **Algo Trading**
+
+Walang extra `.mqh` include files.
+
+## Strategy
+
+- Candle-open bias (SELL below / BUY above)
+- Buffer distance arming
+- BuyStop above (trail down only) / SellStop below (trail up only)
+- Priority + counter, **1 open position**, flip
+- Secure profit then trail
+- Smart risk: 50% start, -5% per tier, dynamic lot
 
 ## Disclaimer
 
-Trading is risky. Test on demo first. Not financial advice.
+Trading is risky. Demo test first. Not financial advice.
