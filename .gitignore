@@ -1,0 +1,11 @@
+# MetaEditor / MT5 build artifacts
+*.ex5
+*.ex4
+*.log
+*.tmp
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
