@@ -5,9 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.01"
+#property version   "1.02"
 #property description "Single-file CandleBiasScalper: bias + one-way pendings + flip + secure/trail + smart risk"
-#property strict
 
 #include <Trade/Trade.mqh>
 
@@ -342,7 +341,7 @@ CBRRiskPlan CBR_BuildRiskPlan(const string symbol,
    const double step  = (vstep > 0.0 ? vstep : vmin);
 
    // Tier lot target from step ladder
-   double lotByTier = CBR_NormalizeVolume(symbol, CBR_TierLotSteps(plan.tierIndex, step));
+   double lotByTiers = CBR_NormalizeVolume(symbol, CBR_TierLotSteps(plan.tierIndex, step));
 
    // Risk-based lot from emergency stop distance
    const double riskMoney = equity * (plan.riskPercent / 100.0);
