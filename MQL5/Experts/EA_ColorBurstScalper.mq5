@@ -431,9 +431,12 @@ void OnTick()
    if(g_hadPosition && !hasPos)
    {
       g_reentryMode = true;
+      g_useReentryGap = false;
       CBS_CancelAllPending(g_trade, g_symbol, InpMagic);
       Print("Basket/position closed → re-entry mode ON");
    }
+   if(hasPos)
+      g_useReentryGap = false; // filled — burst add-ons use normal offset
    g_hadPosition = hasPos;
 
    // Session / daily lock: no new entries
