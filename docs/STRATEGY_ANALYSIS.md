@@ -52,6 +52,17 @@ Ang `PovertyScalperClone.mq5` ay **malinis at bukas** na re-implementation ng *s
 ### Sadyang HINDI natin isinama
 - **Hidden martingale / grid recovery.** Ito ang pinaka-mapanganib na parte at madalas dahilan ng blow-up. Kung talagang gusto mo i-test, iparameter mo nang bukas at may babala — huwag itago. (Default: wala.)
 
+## Mga variant na binuo
+
+| Variant | File | Para saan |
+|---|---|---|
+| MT5 EA | `MQL5/Experts/PovertyScalperClone/PovertyScalperClone.mq5` | FX majors / XAUUSD / Deriv synthetics |
+| MT4 EA | `MQL4/Experts/PovertyScalperClone/PovertyScalperClone.mq4` | FX majors / XAUUSD (MT4 brokers) |
+| Majors preset | `MQL5/Presets/MajorsScalper.set` | Tight scalper defaults (30/30, London/NY overlap) |
+| Deriv V75 preset | `MQL5/Presets/DerivV75.set` | Volatility 75 Index (session off, malaking points — i-calibrate) |
+
+Pareho ang logic ng MT4 at MT5; nag-iiba lang ang API (handles + `CTrade` sa MT5, `OrderSend`/`MarketInfo` sa MT4). Ang TP/SL ay auto-clamp sa broker minimum stop distance.
+
 ## Paano i-tune para lumapit sa "style" nila
 
 - Gawing mas sikip ang `InpStopLossPts` at `InpTakeProfitPts` (halimbawa 30/30) para mas "scalper".

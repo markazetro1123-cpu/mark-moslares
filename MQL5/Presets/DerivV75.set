@@ -1,0 +1,38 @@
+; ============================================================
+;  PovertyScalperClone - Deriv "Volatility 75 Index" (V75) preset
+;  Platform: Deriv MT5. Load via EA Inputs tab -> Load.
+;
+;  IMPORTANT: Synthetic indices have LARGE point values and move
+;  very differently from FX. The TP/SL/body values below are
+;  STARTING PLACEHOLDERS -> calibrate to your symbol:
+;    1. Open the symbol on M1 in the Strategy Tester.
+;    2. Measure a typical M1 candle body (in points) via the
+;       Data Window / crosshair.
+;    3. Set InpMomentumBodyPts ~= a normal body, and TP/SL to a
+;       few times that, keeping ~1:1 risk-reward.
+;  Session filter is OFF: V75 trades 24/7 (incl. weekends).
+; ============================================================
+InpMagic=20260726
+InpLots=0.001
+InpMaxPositions=1
+InpMaxSpreadPoints=0
+InpSlippagePoints=50
+InpTakeProfitPts=5000
+InpStopLossPts=5000
+InpUseTrailing=true
+InpTrailStartPts=2500
+InpTrailStepPts=1500
+InpEmaFast=8
+InpEmaSlow=21
+InpRsiPeriod=14
+InpRsiBuyLevel=55.0
+InpRsiSellLevel=45.0
+InpMomentumBodyPts=2000
+InpUseSession=false
+InpSessionStartHour=0
+InpSessionEndHour=24
+InpTradeFriday=true
+InpFridayStopHour=24
+InpMaxDrawdownPct=20.0
+InpCloseAllOnHalt=false
+InpShowPanel=true

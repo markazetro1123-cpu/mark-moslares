@@ -33,15 +33,15 @@ input group "=== General ==="
 input ulong   InpMagic            = 20260725;   // Magic number (unique per chart)
 input double  InpLots             = 0.01;       // Fixed lot size
 input int     InpMaxPositions     = 1;          // Max simultaneous positions (this symbol)
-input int     InpMaxSpreadPoints  = 30;         // Max allowed spread in points (0 = ignore)
+input int     InpMaxSpreadPoints  = 20;         // Max allowed spread in points (0 = ignore)
 input int     InpSlippagePoints   = 10;         // Max deviation/slippage (points)
 
-input group "=== Targets (in points) ==="
-input int     InpTakeProfitPts    = 80;         // Take Profit (points)
-input int     InpStopLossPts      = 80;         // Stop Loss (points)
+input group "=== Targets (in points) — tight scalper defaults ==="
+input int     InpTakeProfitPts    = 30;         // Take Profit (points)
+input int     InpStopLossPts      = 30;         // Stop Loss (points)
 input bool    InpUseTrailing      = true;       // Enable trailing stop
-input int     InpTrailStartPts    = 40;         // Trailing: profit needed to arm (points)
-input int     InpTrailStepPts     = 20;         // Trailing: trail distance (points)
+input int     InpTrailStartPts    = 15;         // Trailing: profit needed to arm (points)
+input int     InpTrailStepPts     = 10;         // Trailing: trail distance (points)
 
 input group "=== Entry (momentum + trend) ==="
 input int     InpEmaFast          = 8;          // Fast EMA period
@@ -52,9 +52,11 @@ input double  InpRsiSellLevel     = 45.0;       // RSI must be <= this for SELL
 input int     InpMomentumBodyPts  = 30;         // Min body size of last candle (points)
 
 input group "=== Session filter (broker/server time) ==="
+// Default window ~ London/NY OVERLAP (approx 12:00-16:00 UTC).
+// Hours are BROKER/SERVER time — adjust to your broker's GMT offset!
 input bool    InpUseSession       = true;       // Restrict trading to a session window
-input int     InpSessionStartHour = 7;          // Start hour (0-23, server time)
-input int     InpSessionEndHour   = 20;         // End hour (0-23, server time)
+input int     InpSessionStartHour = 13;         // Start hour (0-23, server time)
+input int     InpSessionEndHour   = 17;         // End hour (0-23, server time)
 input bool    InpTradeFriday      = true;       // Allow trading on Fridays
 input int     InpFridayStopHour   = 20;         // Stop opening trades on Friday after this hour
 
@@ -212,16 +214,23 @@ void OpenTrade(const ENUM_ORDER_TYPE type)
                   : SymbolInfoDouble(_Symbol, SYMBOL_BID);
    price = NormalizeDouble(price, _Digits);
 
+   // Respect the broker's minimum stop distance so tight SL/TP are not rejected.
+   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   int slPts = InpStopLossPts;
+   int tpPts = InpTakeProfitPts;
+   if(slPts > 0 && slPts < stopsLevel + 1) slPts = stopsLevel + 1;
+   if(tpPts > 0 && tpPts < stopsLevel + 1) tpPts = stopsLevel + 1;
+
    double sl = 0.0, tp = 0.0;
    if(type == ORDER_TYPE_BUY)
    {
-      if(InpStopLossPts   > 0) sl = price - InpStopLossPts   * _Point;
-      if(InpTakeProfitPts > 0) tp = price + InpTakeProfitPts * _Point;
+      if(slPts > 0) sl = price - slPts * _Point;
+      if(tpPts > 0) tp = price + tpPts * _Point;
    }
    else
    {
-      if(InpStopLossPts   > 0) sl = price + InpStopLossPts   * _Point;
-      if(InpTakeProfitPts > 0) tp = price - InpTakeProfitPts * _Point;
+      if(slPts > 0) sl = price + slPts * _Point;
+      if(tpPts > 0) tp = price - tpPts * _Point;
    }
 
    sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0.0;
@@ -244,6 +253,10 @@ void OpenTrade(const ENUM_ORDER_TYPE type)
 //====================================================================
 void ManageTrailing()
 {
+   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   int trailStep  = InpTrailStepPts;
+   if(trailStep < stopsLevel + 1) trailStep = stopsLevel + 1;
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       if(!posinfo.SelectByIndex(i)) continue;
@@ -263,7 +276,7 @@ void ManageTrailing()
          double profitPts = (bid - openPrice) / _Point;
          if(profitPts >= InpTrailStartPts)
          {
-            double newSL = NormalizeDouble(bid - InpTrailStepPts * _Point, _Digits);
+            double newSL = NormalizeDouble(bid - trailStep * _Point, _Digits);
             if(newSL > openPrice && (curSL == 0.0 || newSL > curSL))
                trade.PositionModify(posinfo.Ticket(), newSL, tp);
          }
@@ -273,7 +286,7 @@ void ManageTrailing()
          double profitPts = (openPrice - ask) / _Point;
          if(profitPts >= InpTrailStartPts)
          {
-            double newSL = NormalizeDouble(ask + InpTrailStepPts * _Point, _Digits);
+            double newSL = NormalizeDouble(ask + trailStep * _Point, _Digits);
             if(newSL < openPrice && (curSL == 0.0 || newSL < curSL))
                trade.PositionModify(posinfo.Ticket(), newSL, tp);
          }
