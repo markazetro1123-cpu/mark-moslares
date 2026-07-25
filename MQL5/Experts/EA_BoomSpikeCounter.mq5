@@ -623,9 +623,16 @@ void BSC_RecoverState()
       return;
    }
 
-   // Orphan BuyStops with no position → clean
+   // Live BuyStops without position → wait for BUY fill (do NOT delete)
    if(BSC_CountPendings(ORDER_TYPE_BUY_STOP) > 0)
-      BSC_DeleteBuyStops();
+   {
+      g_waitingBuyFill = true;
+      g_waitBuyFillSince = TimeCurrent();
+      g_sharedLevel = BSC_BuyStopTriggerPrice();
+      BSC_SetState(SELL_ACTIVE);
+      Print("BSC recover → SELL_ACTIVE (waiting BuyStop fills), level=", g_sharedLevel);
+      return;
+   }
 
    BSC_SetState(WAIT_SELL_SETUP);
    Print("BSC recover → WAIT_SELL_SETUP");
@@ -782,7 +789,7 @@ bool BSC_OpenSellWithSL(const double sl, const double lot, ulong &ticketOut)
       // Adverse slippage for SELL = fill at lower price (worse). 0 = market.
       double entryPx = 0.0;
       if(InpEntrySlipPrice > 0.0)
-         entryPx = BSC_NormPrice(bid - InpEntrySlipPrice - BSC_EffectiveSpreadPrice() * 0.0);
+         entryPx = BSC_NormPrice(bid - InpEntrySlipPrice);
 
       PrintFormat("BSC SELL send lot=%.2f bid=%.5f entryPx=%.5f slipPts=%d spread=%.5f SL=%.5f",
                   lot, bid, entryPx, SlippagePoints, BSC_EffectiveSpreadPrice(), validSL);
@@ -924,19 +931,25 @@ bool BSC_ModifyAllBuyStops(const double newLevel)
 //======================================================================
 void BSC_OnWaitSellSetup()
 {
-   // Clean orphans
-   if(BSC_CountPendings(ORDER_TYPE_BUY_STOP) > 0)
-      BSC_DeleteBuyStops();
-
    if(BSC_CountPositions(POSITION_TYPE_BUY) > 0)
    {
-      BSC_SetState(BUY_ACTIVE);
+      BSC_ActivateBuyMode();
       return;
    }
    if(BSC_CountPositions(POSITION_TYPE_SELL) > 0)
    {
       g_sellTicket = BSC_FindOurSell();
       BSC_SetState(SELL_ACTIVE);
+      return;
+   }
+   // If BuyStops exist here, hand off to SELL_ACTIVE wait-fill logic (never wipe)
+   if(BSC_CountPendings(ORDER_TYPE_BUY_STOP) > 0)
+   {
+      g_waitingBuyFill = true;
+      g_waitBuyFillSince = TimeCurrent();
+      g_sharedLevel = BSC_BuyStopTriggerPrice();
+      BSC_SetState(SELL_ACTIVE);
+      Print("BSC WAIT→SELL_ACTIVE handoff: protect live BuyStops");
       return;
    }
 
