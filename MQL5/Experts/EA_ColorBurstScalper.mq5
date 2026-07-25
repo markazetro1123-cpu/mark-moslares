@@ -13,8 +13,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.00"
-#property description "ColorBurstScalper: NY/PH session, color pending, burst basket (single file)"
+#property version   "1.10"
+#property description "ColorBurstScalper v1.10: same strategy, safer R:R + win-only reentry"
 
 #include <Trade/Trade.mqh>
 
@@ -31,29 +31,33 @@ input int    InpSessionEndMinute     = 0;      // End minute
 
 input group "=== Entry ==="
 input double InpBufferDistance       = 1.0;    // First arm buffer from candle open (price)
-input double InpPendingOffset        = 0.2;    // Pending gap from market price
-input double InpReentryGap           = 1.0;    // After close: pending gap from current price
-input int    InpMaxBasket            = 3;      // Max open positions (burst)
+input double InpPendingOffset        = 0.30;   // Pending gap from market price
+input double InpReentryGap           = 1.0;    // After WIN close: pending gap from current
+input int    InpMaxBasket            = 1;      // Max open positions (1 = less whipsaw)
+input bool   InpReentryOnlyAfterWin  = true;   // Re-entry only after profit close (not after SL)
+input int    InpLossCooldownSec      = 120;    // Wait after losing close before new pending
 input long   InpMagic                = 260725; // Magic number
 
 input group "=== Burst / Basket ==="
-input double InpBurstProfit          = 0.20;   // Close basket at this profit (price)
-input double InpBasketTrailStart     = 0.12;   // Start basket trail at this profit
-input double InpBasketTrailGap       = 0.08;   // Basket trail distance
+input double InpBurstProfit          = 0.50;   // Close basket at this profit (price)
+input double InpBasketTrailStart     = 0.30;   // Start basket trail at this profit
+input double InpBasketTrailGap       = 0.15;   // Basket trail distance
+input double InpMinBurstSpreadMult   = 2.0;    // Burst TP at least N x spread
 input bool   InpUseEmergencySL       = true;   // Set emergency SL on fill
-input double InpEmergencyStopDist    = 5.0;    // Emergency SL distance (price)
+input double InpEmergencyStopDist    = 1.50;   // Emergency SL distance (price)
 
-input group "=== Aggressive Lot ==="
-input bool   InpUseAggressiveLot     = true;   // Grow lot with capital
+input group "=== Lot (grows with capital, risk-capped) ==="
+input bool   InpUseAggressiveLot     = true;   // Grow lot with capital tiers
 input double InpBaseLot              = 0.0;    // Base lot (0 = broker min)
 input double InpLotPerTier           = 1.0;    // Extra volume-steps per equity tier
-input double InpRiskPercentStart     = 50.0;   // Start risk % (aggressive)
-input double InpRiskPercentStep      = 5.0;    // Reduce risk % per tier
-input double InpRiskPercentFloor     = 15.0;   // Min risk %
+input double InpRiskPercentStart     = 2.0;    // Risk % of equity vs emergency SL
+input double InpRiskPercentStep      = 0.0;    // Reduce risk % per tier
+input double InpRiskPercentFloor     = 1.0;    // Min risk %
 input double InpFixedLot             = 0.0;    // Fixed lot override (0 = auto)
 
 input group "=== Runtime ==="
-input double InpMaxDailyLossPct      = 80.0;   // Daily loss lock % (0=off)
+input double InpMaxSpreadPrice       = 0.40;   // Skip entries if spread > this (0=off)
+input double InpMaxDailyLossPct      = 10.0;   // Daily loss lock % (0=off)
 input int    InpSlippagePoints       = 30;     // Slippage points
 input bool   InpAllowBuy             = true;   // Allow BUY
 input bool   InpAllowSell            = true;   // Allow SELL
@@ -209,7 +213,11 @@ double CBS_CalcLot(const string symbol, const ENUM_ORDER_TYPE type, const double
          const double riskMoney = equity * (riskPct / 100.0);
          const double lossPerLot = CBS_LossPerLot(symbol, InpEmergencyStopDist);
          if(lossPerLot > 0.0)
-            lot = MathMax(lot, riskMoney / lossPerLot);
+         {
+            // Cap by risk (do NOT take the larger lot — that blows accounts)
+            const double riskLot = riskMoney / lossPerLot;
+            lot = MathMin(lot, riskLot);
+         }
       }
    }
 
@@ -342,8 +350,10 @@ bool            g_dailyLock = false;
 double          g_dayStartEq = 0.0;
 int             g_dayStamp = -1;
 bool            g_hadPosition = false;
-bool            g_reentryMode = false;          // after close: arm immediately
+bool            g_reentryMode = false;          // after WIN close: arm immediately
 bool            g_useReentryGap = false;        // pending distance = reentry gap until filled
+double          g_lastBasketMoney = 0.0;       // last known basket floating PnL
+datetime        g_lossCooldownUntil = 0;
 
 //======================================================================
 // FORWARD DECLS
@@ -426,17 +436,38 @@ void OnTick()
    ApplyEmergencySL();
    ManageBasket();
 
-   // Detect close → enable re-entry mode
+   // Track basket money while open (for win/loss re-entry decision)
    const bool hasPos = (CBS_CountPositions(g_symbol, InpMagic) > 0);
+   if(hasPos)
+   {
+      int c; long s; double avg, money;
+      if(CBS_BasketStats(g_symbol, InpMagic, c, s, avg, money))
+         g_lastBasketMoney = money;
+      g_useReentryGap = false; // filled — burst add-ons use normal offset
+   }
+
+   // Detect close → re-entry ONLY after profitable close (optional)
    if(g_hadPosition && !hasPos)
    {
-      g_reentryMode = true;
+      const bool wasWin = (g_lastBasketMoney > 0.0);
       g_useReentryGap = false;
       CBS_CancelAllPending(g_trade, g_symbol, InpMagic);
-      Print("Basket/position closed → re-entry mode ON");
+
+      if(wasWin || !InpReentryOnlyAfterWin)
+      {
+         g_reentryMode = true;
+         PrintFormat("Close WIN money=%.2f → re-entry ON", g_lastBasketMoney);
+      }
+      else
+      {
+         g_reentryMode = false;
+         if(InpLossCooldownSec > 0)
+            g_lossCooldownUntil = TimeCurrent() + InpLossCooldownSec;
+         PrintFormat("Close LOSS money=%.2f → NO re-entry, cooldown %ds",
+                     g_lastBasketMoney, InpLossCooldownSec);
+      }
+      g_lastBasketMoney = 0.0;
    }
-   if(hasPos)
-      g_useReentryGap = false; // filled — burst add-ons use normal offset
    g_hadPosition = hasPos;
 
    // Session / daily lock: no new entries
@@ -444,6 +475,23 @@ void OnTick()
    {
       CBS_CancelAllPending(g_trade, g_symbol, InpMagic);
       return;
+   }
+
+   if(g_lossCooldownUntil > 0 && TimeCurrent() < g_lossCooldownUntil)
+   {
+      CBS_CancelAllPending(g_trade, g_symbol, InpMagic);
+      return;
+   }
+
+   // Skip new entries when spread eats the burst TP
+   if(InpMaxSpreadPrice > 0.0)
+   {
+      const double spread = SymbolInfoDouble(g_symbol, SYMBOL_ASK) - SymbolInfoDouble(g_symbol, SYMBOL_BID);
+      if(spread > InpMaxSpreadPrice)
+      {
+         CBS_CancelAllPending(g_trade, g_symbol, InpMagic);
+         return;
+      }
    }
 
    ManageEntries();
@@ -595,10 +643,19 @@ void ManageBasket()
    else if(side == POSITION_TYPE_SELL) favor = avg - ask;
    else return;
 
-   // Burst TP — small profit close whole basket
-   if(favor >= InpBurstProfit)
+   g_lastBasketMoney = money;
+
+   // Burst TP must clear spread cost
+   const double spread = ask - bid;
+   double need = InpBurstProfit;
+   if(InpMinBurstSpreadMult > 0.0)
+      need = MathMax(need, spread * InpMinBurstSpreadMult);
+
+   // Burst TP — close whole basket (require price favor AND money > 0)
+   if(favor >= need && money > 0.0)
    {
-      PrintFormat("BURST TP favor=%.5f money=%.2f positions=%d — close all", favor, money, count);
+      PrintFormat("BURST TP favor=%.5f need=%.5f money=%.2f positions=%d — close all",
+                  favor, need, money, count);
       CBS_CloseBasket(g_trade, g_symbol, InpMagic);
       CBS_CancelAllPending(g_trade, g_symbol, InpMagic);
       return;
