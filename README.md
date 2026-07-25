@@ -1,56 +1,46 @@
-# TrendPulse EA — MetaTrader 5 Trading Bot
+# CandleBiasScalper — MT5 EA
 
-Automated **Expert Advisor (EA)** for MetaTrader 5. Strategy: **EMA crossover + RSI filter**, with ATR-based stops and risk-based position sizing.
+Candle-bias one-way trailing pending scalper for **XAUUSD** and **US30**.  
+Works on **any timeframe** (chart TF = EA TF). Built for Deriv / Tickmill compatibility.
 
-## Strategy (simple)
+## Strategy (locked)
 
-1. **BUY** when Fast EMA crosses above Slow EMA and RSI is below the buy-max (not overbought).
-2. **SELL** when Fast EMA crosses below Slow EMA and RSI is above the sell-min (not oversold).
-3. Stop-loss = ATR × multiplier; take-profit = SL × risk-reward ratio.
-4. Optional trailing stop after entry.
+1. Bias from candle Open: below = SELL priority, above = BUY priority  
+2. Arm only after `BufferDistance` from Open  
+3. BUY stop above price (trail **down only**), SELL stop below price (trail **up only**)  
+4. Priority + counter pending; **1 open position** max with flip  
+5. Secure profit floor then trail for more  
+6. Smart risk: start **50%** room, **-5% per equity tier**, dynamic lot growth  
 
-Default risk: **1% of balance per trade**.
+## Install
 
-## Project layout
+1. Copy:
+   - `MQL5/Experts/EA_CandleBiasScalper.mq5` → MT5 `MQL5/Experts/`
+   - `MQL5/Include/CBR_Utils.mqh` → `MQL5/Include/`
+   - `MQL5/Include/CBR_Risk.mqh` → `MQL5/Include/`
+2. Compile in MetaEditor (F7)
+3. Attach to XAUUSD or US30 chart (any TF)
+4. Enable **Algo Trading**
 
-```
-MQL5/
-  Experts/EA_TrendPulse.mq5   ← main EA (compile this)
-  Include/TradeHelpers.mqh    ← lot sizing, filters, trailing
-config/
-  TrendPulse_XAUUSD_H1.set    ← sample input preset
-```
-
-## Install sa MetaTrader 5
-
-1. Buksan ang MT5 → **File → Open Data Folder**.
-2. Copy:
-   - `MQL5/Experts/EA_TrendPulse.mq5` → `MQL5/Experts/`
-   - `MQL5/Include/TradeHelpers.mqh` → `MQL5/Include/`
-3. Sa MetaEditor, open `EA_TrendPulse.mq5` → **Compile** (F7).
-4. I-drag ang EA sa chart (hal. XAUUSD H1 o EURUSD H1).
-5. I-enable **Algo Trading** sa toolbar.
-6. (Optional) Load preset: Inputs → **Load** → `config/TrendPulse_XAUUSD_H1.set`.
-
-## Important inputs
+## Core inputs
 
 | Input | Default | Meaning |
 |-------|---------|---------|
-| `InpFastEMA` / `InpSlowEMA` | 12 / 26 | Trend crossover |
-| `InpRSIBuyMax` / `InpRSISellMin` | 60 / 40 | RSI entry filter |
-| `InpRiskPercent` | 1.0 | % balance risk per trade |
-| `InpFixedLots` | 0 | >0 to ignore risk % |
-| `InpATRMultiplier` | 1.5 | SL distance |
-| `InpRRRatio` | 2.0 | TP = SL × this |
-| `InpMaxSpreadPts` | 30 | Skip if spread too wide |
-| `InpUseTrailing` | true | Move SL with price |
+| `InpBufferDistance` | 1.0 | Distance from open before arming |
+| `InpPendingOffset` | 0.2 | Pending gap from current price |
+| `InpSecureProfit` | 0.2 | Secure floor |
+| `InpTrailDistance` | 0.1 | Trail gap from current price |
+| `InpEmergencyStopDist` | 5.0 | Emergency SL distance |
+| `InpUseSmartRisk` | true | Tiered lot/risk manager |
 
-## Backtest muna (strongly recommended)
+## Files
 
-1. MT5 → **View → Strategy Tester**.
-2. Select `EA_TrendPulse`, symbol, timeframe (H1), model: **Every tick based on real ticks** kung available.
-3. Run on **demo** first. Huwag mag-live hangga't hindi ka satisfied sa results.
+```
+MQL5/Experts/EA_CandleBiasScalper.mq5
+MQL5/Include/CBR_Utils.mqh
+MQL5/Include/CBR_Risk.mqh
+```
 
 ## Disclaimer
 
-Trading involves risk of loss. This EA is educational / starter tooling — **not financial advice**. Test thoroughly on demo before any real account.
+Trading is risky. Test on demo first. Not financial advice.
