@@ -5,22 +5,25 @@
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "2.00"
-#property description "v2: priority-only entries, ATR distances, spread filter, safer risk/exits"
+#property version   "2.10"
+#property description "v2.10: two toggleable strategies — CandleColor follow + Opposite pending"
 
 #include <Trade/Trade.mqh>
 
 //======================================================================
 // Inputs
 //======================================================================
+input group "=== Strategies (true/false) ==="
+input bool   InpStratCandleColor    = true;    // [1] Candle Color: GREEN=BUY only / RED=SELL only
+input bool   InpStratOpposite       = false;   // [2] Opposite: DOWN move=BUY pending / UP move=SELL pending
+
 input group "=== Entry ==="
 input double InpBufferDistance      = 0.0;     // Buffer price (0 = use ATR)
 input double InpPendingOffset       = 0.0;     // Pending offset price (0 = use ATR)
 input double InpBufferATRMult       = 0.40;    // Buffer = ATR * this
 input double InpOffsetATRMult       = 0.20;    // Offset = ATR * this
 input int    InpATRPeriod           = 14;      // ATR period
-input bool   InpPriorityOnly        = true;    // Trade bias side only (recommended)
-input bool   InpAllowFlip           = false;   // Flip if counter fills (off = less whipsaw)
+input bool   InpAllowFlip           = false;   // Flip if both sides fill (usually keep false)
 input long   InpMagic               = 260715;  // Magic number
 
 input group "=== Profit ==="
@@ -331,7 +334,8 @@ ENUM_TIMEFRAMES g_tf;
 int             g_atrHandle      = INVALID_HANDLE;
 datetime        g_candleOpenTime = 0;
 double          g_candleOpen     = 0.0;
-int             g_bias           = 0;  // +1 buy, -1 sell, 0 none
+int             g_candleColor    = 0;  // +1 green, -1 red, 0 doji/flat
+int             g_moveDir        = 0;  // +1 up from open, -1 down from open, 0 none
 bool            g_dailyLocked    = false;
 double          g_dayStartEquity = 0.0;
 int             g_dayStamp       = -1;
@@ -361,6 +365,7 @@ double ComputeLot(const ENUM_ORDER_TYPE marginType, const double refPrice);
 bool BufferPassedSell();
 bool BufferPassedBuy();
 bool InCooldown();
+void ResolveWantedSides(bool &wantBuy, bool &wantSell);
 
 //======================================================================
 int OnInit()
@@ -372,6 +377,11 @@ int OnInit()
    {
       Print("ERROR: SymbolSelect failed for ", g_symbol);
       return INIT_FAILED;
+   }
+   if(!InpStratCandleColor && !InpStratOpposite)
+   {
+      Print("ERROR: enable at least one strategy (InpStratCandleColor and/or InpStratOpposite)");
+      return INIT_PARAMETERS_INCORRECT;
    }
    if(InpATRPeriod < 1 || InpBufferATRMult < 0.0 || InpOffsetATRMult < 0.0 ||
       InpSecureATRMult < 0.0 || InpTrailATRMult < 0.0 || InpEmergencyATRMult < 0.0)
@@ -402,11 +412,12 @@ int OnInit()
    RefreshDistances();
    RefreshCandleContext(true);
 
-   PrintFormat("CandleBiasScalper v2 ready | %s | %s | priorityOnly=%s flip=%s | ATR=%.5f buf=%.5f off=%.5f sec=%.5f trail=%.5f",
+   PrintFormat("CandleBiasScalper v2.10 ready | %s | %s | Strat1_CandleColor=%s Strat2_Opposite=%s flip=%s | ATR=%.5f",
                g_symbol, EnumToString(g_tf),
-               (InpPriorityOnly ? "Y" : "N"),
+               (InpStratCandleColor ? "ON" : "OFF"),
+               (InpStratOpposite ? "ON" : "OFF"),
                (InpAllowFlip ? "Y" : "N"),
-               g_atr, g_distBuffer, g_distOffset, g_distSecure, g_distTrail);
+               g_atr);
    return INIT_SUCCEEDED;
 }
 
@@ -454,13 +465,11 @@ void OnTick()
    if(hasPos)
    {
       ManageOpenPosition(posTicket, posType);
-      if(!InpPriorityOnly && InpAllowFlip)
+      // While in a trade: only keep counter pending if flip mode is on
+      if(InpAllowFlip)
          ManageCounterPendingWhileInPosition(posType);
       else
-      {
-         // Keep only opposite? No — cancel both pending while in trade (hold clean)
          CBR_CancelAllPending(g_trade, g_symbol, InpMagic);
-      }
       return;
    }
 
@@ -661,9 +670,17 @@ void RefreshCandleContext(const bool force)
 
    const double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
    const double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
-   if(bid < g_candleOpen)      g_bias = -1;
-   else if(ask > g_candleOpen) g_bias = +1;
-   else                        g_bias = 0;
+   const double mid = (bid + ask) * 0.5;
+
+   // Candle color: green / red / doji (current forming candle)
+   if(mid > g_candleOpen + CBR_Point(g_symbol) * 0.5)      g_candleColor = +1;
+   else if(mid < g_candleOpen - CBR_Point(g_symbol) * 0.5) g_candleColor = -1;
+   else                                                     g_candleColor = 0;
+
+   // Movement vs open (for opposite strategy + buffer arming)
+   if(bid < g_candleOpen)      g_moveDir = -1;
+   else if(ask > g_candleOpen) g_moveDir = +1;
+   else                        g_moveDir = 0;
 }
 
 bool BufferPassedSell()
@@ -687,48 +704,53 @@ double ComputeLot(const ENUM_ORDER_TYPE marginType, const double refPrice)
    return plan.lot;
 }
 
+void ResolveWantedSides(bool &wantBuy, bool &wantSell)
+{
+   wantBuy  = false;
+   wantSell = false;
+
+   //--------------------------------------------------------------------
+   // Strategy [1] Candle Color Follow
+   // GREEN candle → BUY only | RED candle → SELL only
+   //--------------------------------------------------------------------
+   if(InpStratCandleColor)
+   {
+      if(g_candleColor > 0 && InpAllowBuy && BufferPassedBuy())
+         wantBuy = true;
+      if(g_candleColor < 0 && InpAllowSell && BufferPassedSell())
+         wantSell = true;
+   }
+
+   //--------------------------------------------------------------------
+   // Strategy [2] Opposite Entry
+   // DOWN movement → BUY pending | UP movement → SELL pending
+   //--------------------------------------------------------------------
+   if(InpStratOpposite)
+   {
+      if(BufferPassedSell() && InpAllowBuy)   // price went down from open
+         wantBuy = true;
+      if(BufferPassedBuy() && InpAllowSell)   // price went up from open
+         wantSell = true;
+   }
+}
+
 void ManageEntryPendings()
 {
-   // SELL priority
-   if(g_bias < 0 && InpAllowSell && BufferPassedSell())
-   {
-      EnsureSellStop_OneWayUp();
-      if(InpPriorityOnly)
-         CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_BUY_STOP);
-      else if(InpAllowBuy)
-         EnsureBuyStop_OneWayDown();
-      else
-         CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_BUY_STOP);
-      return;
-   }
+   bool wantBuy  = false;
+   bool wantSell = false;
+   ResolveWantedSides(wantBuy, wantSell);
 
-   // BUY priority
-   if(g_bias > 0 && InpAllowBuy && BufferPassedBuy())
-   {
+   if(wantBuy)
       EnsureBuyStop_OneWayDown();
-      if(InpPriorityOnly)
-         CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_SELL_STOP);
-      else if(InpAllowSell)
-         EnsureSellStop_OneWayUp();
-      else
-         CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_SELL_STOP);
-      return;
-   }
+   else
+      CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_BUY_STOP);
 
-   // Bias not armed: only ratchet existing priority pending; drop opposite if priority-only
-   if(InpPriorityOnly)
-   {
-      if(g_bias < 0)
-         CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_BUY_STOP);
-      if(g_bias > 0)
-         CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_SELL_STOP);
-   }
-
-   ulong ticket; double px;
-   if(CBR_FindPending(g_symbol, InpMagic, ORDER_TYPE_BUY_STOP, ticket, px))
-      EnsureBuyStop_OneWayDown();
-   if(CBR_FindPending(g_symbol, InpMagic, ORDER_TYPE_SELL_STOP, ticket, px))
+   if(wantSell)
       EnsureSellStop_OneWayUp();
+   else
+      CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_SELL_STOP);
+
+   // If a pending already exists and is still wanted, one-way trail continues inside Ensure*
 }
 
 void ManageCounterPendingWhileInPosition(const long posType)
