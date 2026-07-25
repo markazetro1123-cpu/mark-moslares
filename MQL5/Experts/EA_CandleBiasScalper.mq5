@@ -1,41 +1,73 @@
 //+------------------------------------------------------------------+
 //| EA_CandleBiasScalper.mq5                                         |
-//| Candle-Bias One-Way Trailing Pending Scalper                     |
+//| Candle-Bias One-Way Trailing Pending Scalper (v2)                |
 //| XAUUSD / US30 | Any timeframe | Deriv / Tickmill compatible      |
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.02"
-#property description "Single-file CandleBiasScalper: bias + one-way pendings + flip + secure/trail + smart risk"
+#property version   "2.00"
+#property description "v2: priority-only entries, ATR distances, spread filter, safer risk/exits"
 
 #include <Trade/Trade.mqh>
 
-//==================== INLINE HELPERS (single-file) ====================
-//--- utils
-//+------------------------------------------------------------------+
-//+------------------------------------------------------------------+
+//======================================================================
+// Inputs
+//======================================================================
+input group "=== Entry ==="
+input double InpBufferDistance      = 0.0;     // Buffer price (0 = use ATR)
+input double InpPendingOffset       = 0.0;     // Pending offset price (0 = use ATR)
+input double InpBufferATRMult       = 0.40;    // Buffer = ATR * this
+input double InpOffsetATRMult       = 0.20;    // Offset = ATR * this
+input int    InpATRPeriod           = 14;      // ATR period
+input bool   InpPriorityOnly        = true;    // Trade bias side only (recommended)
+input bool   InpAllowFlip           = false;   // Flip if counter fills (off = less whipsaw)
+input long   InpMagic               = 260715;  // Magic number
 
+input group "=== Profit ==="
+input double InpSecureProfit        = 0.0;     // Secure floor price (0 = use ATR)
+input double InpTrailDistance       = 0.0;     // Trail distance price (0 = use ATR)
+input double InpSecureATRMult       = 0.55;    // Secure = ATR * this
+input double InpTrailATRMult        = 0.30;    // Trail = ATR * this
+input double InpMinSecureSpreadMult = 2.5;     // Secure at least N * current spread
 
-//+------------------------------------------------------------------+
+input group "=== Filters ==="
+input double InpMaxSpreadPoints     = 80;      // Max spread in points (0 = off)
+input int    InpCooldownSeconds     = 90;      // Wait after position close before new pending
+
+input group "=== Risk ==="
+input bool   InpUseSmartRisk        = true;    // Smart risk manager
+input double InpBaseRiskPercent     = 2.0;     // Risk % of equity per trade (via emergency SL)
+input double InpRiskStepPerTier     = 0.25;    // Reduce risk % per equity tier
+input double InpMinRiskPercent      = 1.0;     // Floor risk %
+input double InpFixedLot            = 0.0;     // Fixed lot (0 = smart/min)
+input double InpEmergencyStopDist   = 0.0;     // Emergency SL price (0 = use ATR)
+input double InpEmergencyATRMult    = 1.80;    // Emergency SL = ATR * this
+input double InpMaxDailyLossPct     = 10.0;    // Max daily loss % then pause
+
+input group "=== Runtime ==="
+input int    InpSlippagePoints      = 30;      // Max slippage (points)
+input bool   InpAllowBuy            = true;    // Allow BUY side
+input bool   InpAllowSell           = true;    // Allow SELL side
+
+//======================================================================
+// Helpers
+//======================================================================
 double CBR_Point(const string symbol)
 {
    double p = SymbolInfoDouble(symbol, SYMBOL_POINT);
    return (p > 0.0 ? p : _Point);
 }
 
-//+------------------------------------------------------------------+
 int CBR_Digits(const string symbol)
 {
    return (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
 }
 
-//+------------------------------------------------------------------+
 double CBR_NormalizePrice(const string symbol, double price)
 {
    return NormalizeDouble(price, CBR_Digits(symbol));
 }
 
-//+------------------------------------------------------------------+
 double CBR_NormalizeVolume(const string symbol, double volume)
 {
    const double vmin  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
@@ -52,7 +84,6 @@ double CBR_NormalizeVolume(const string symbol, double volume)
    return NormalizeDouble(volume, volDigits);
 }
 
-//+------------------------------------------------------------------+
 bool CBR_SelectFilling(const string symbol, ENUM_ORDER_TYPE_FILLING &filling)
 {
    const int modes = (int)SymbolInfoInteger(symbol, SYMBOL_FILLING_MODE);
@@ -70,49 +101,61 @@ bool CBR_SelectFilling(const string symbol, ENUM_ORDER_TYPE_FILLING &filling)
    return true;
 }
 
-//+------------------------------------------------------------------+
 double CBR_StopsLevelDistance(const string symbol)
 {
-   const int stops = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   const int stops  = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
    const int freeze = (int)SymbolInfoInteger(symbol, SYMBOL_TRADE_FREEZE_LEVEL);
-   const int lvl = MathMax(stops, freeze);
-   return lvl * CBR_Point(symbol);
+   return MathMax(stops, freeze) * CBR_Point(symbol);
 }
 
-//+------------------------------------------------------------------+
+double CBR_SpreadPrice(const string symbol)
+{
+   const double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+   const double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   return MathMax(0.0, ask - bid);
+}
+
 bool CBR_IsTradeAllowed(const string symbol)
 {
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
       return false;
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
       return false;
-   if(!SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE))
-      return false;
-   long mode = SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE);
+   const long mode = SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE);
    if(mode == SYMBOL_TRADE_MODE_DISABLED)
       return false;
    return true;
 }
 
-//+------------------------------------------------------------------+
-int CBR_CountPositions(const string symbol, const long magic)
+bool CBR_SpreadOk(const string symbol, const double maxSpreadPoints)
 {
-   int count = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; --i)
-   {
-      const ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !PositionSelectByTicket(ticket))
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != symbol)
-         continue;
-      if(PositionGetInteger(POSITION_MAGIC) != magic)
-         continue;
-      count++;
-   }
-   return count;
+   if(maxSpreadPoints <= 0.0)
+      return true;
+   const double spreadPts = CBR_SpreadPrice(symbol) / CBR_Point(symbol);
+   return (spreadPts <= maxSpreadPoints);
 }
 
-//+------------------------------------------------------------------+
+double CBR_ATRValue(const int handle)
+{
+   if(handle == INVALID_HANDLE)
+      return 0.0;
+   double buf[];
+   ArraySetAsSeries(buf, true);
+   if(CopyBuffer(handle, 0, 0, 3, buf) < 1)
+      return 0.0;
+   return buf[0];
+}
+
+double CBR_PickDist(const double fixedPrice, const double atr, const double atrMult, const double floorDist)
+{
+   double d = fixedPrice;
+   if(d <= 0.0)
+      d = atr * atrMult;
+   if(d < floorDist)
+      d = floorDist;
+   return d;
+}
+
 bool CBR_GetOurPosition(const string symbol, const long magic, ulong &ticket, long &type)
 {
    ticket = 0;
@@ -133,31 +176,6 @@ bool CBR_GetOurPosition(const string symbol, const long magic, ulong &ticket, lo
    return false;
 }
 
-//+------------------------------------------------------------------+
-int CBR_CountPending(const string symbol, const long magic)
-{
-   int count = 0;
-   for(int i = OrdersTotal() - 1; i >= 0; --i)
-   {
-      const ulong ticket = OrderGetTicket(i);
-      if(ticket == 0)
-         continue;
-      if(!OrderSelect(ticket))
-         continue;
-      if(OrderGetString(ORDER_SYMBOL) != symbol)
-         continue;
-      if(OrderGetInteger(ORDER_MAGIC) != magic)
-         continue;
-      const long t = OrderGetInteger(ORDER_TYPE);
-      if(t == ORDER_TYPE_BUY_STOP || t == ORDER_TYPE_SELL_STOP ||
-         t == ORDER_TYPE_BUY_LIMIT || t == ORDER_TYPE_SELL_LIMIT ||
-         t == ORDER_TYPE_BUY_STOP_LIMIT || t == ORDER_TYPE_SELL_STOP_LIMIT)
-         count++;
-   }
-   return count;
-}
-
-//+------------------------------------------------------------------+
 bool CBR_FindPending(const string symbol, const long magic, const long orderType, ulong &ticket, double &price)
 {
    ticket = 0;
@@ -180,7 +198,6 @@ bool CBR_FindPending(const string symbol, const long magic, const long orderType
    return false;
 }
 
-//+------------------------------------------------------------------+
 bool CBR_CancelPendingByType(CTrade &trade, const string symbol, const long magic, const long orderType)
 {
    bool ok = true;
@@ -201,7 +218,6 @@ bool CBR_CancelPendingByType(CTrade &trade, const string symbol, const long magi
    return ok;
 }
 
-//+------------------------------------------------------------------+
 bool CBR_CancelAllPending(CTrade &trade, const string symbol, const long magic)
 {
    bool ok = true;
@@ -223,7 +239,6 @@ bool CBR_CancelAllPending(CTrade &trade, const string symbol, const long magic)
    return ok;
 }
 
-//+------------------------------------------------------------------+
 double CBR_LossPerLotForDistance(const string symbol, const double priceDistance)
 {
    if(priceDistance <= 0.0)
@@ -235,7 +250,6 @@ double CBR_LossPerLotForDistance(const string symbol, const double priceDistance
    return (priceDistance / tickSize) * tickValue;
 }
 
-//+------------------------------------------------------------------+
 double CBR_LotForRiskMoney(const string symbol, const double riskMoney, const double stopDistance)
 {
    const double lossPerLot = CBR_LossPerLotForDistance(symbol, stopDistance);
@@ -244,43 +258,32 @@ double CBR_LotForRiskMoney(const string symbol, const double riskMoney, const do
    return CBR_NormalizeVolume(symbol, riskMoney / lossPerLot);
 }
 
-//+------------------------------------------------------------------+
-double CBR_MaxLotByMargin(const string symbol, const double price, const ENUM_ORDER_TYPE type, const double maxMarginShare = 0.8)
+double CBR_MaxLotByMargin(const string symbol, const double price, const ENUM_ORDER_TYPE type, const double maxMarginShare = 0.35)
 {
    const double free = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   const double vmin = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
    if(free <= 0.0)
-      return SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+      return vmin;
 
    double marginOne = 0.0;
    if(!OrderCalcMargin(type, symbol, 1.0, price, marginOne) || marginOne <= 0.0)
    {
-      // fallback rough estimate using min lot scale
       double marginMin = 0.0;
-      const double vmin = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
       if(!OrderCalcMargin(type, symbol, vmin, price, marginMin) || marginMin <= 0.0)
          return vmin;
       marginOne = marginMin / vmin;
    }
 
-   const double affordable = (free * maxMarginShare) / marginOne;
-   return CBR_NormalizeVolume(symbol, affordable);
+   return CBR_NormalizeVolume(symbol, (free * maxMarginShare) / marginOne);
 }
-
-
-//--- risk
-//+------------------------------------------------------------------+
-//+------------------------------------------------------------------+
-
 
 struct CBRRiskPlan
 {
-   double riskPercent;     // max risk room for emergency/stop sizing
-   double lot;             // computed trade volume
-   int    maxEntries;      // allowed pending/entry intensity for tier
-   int    tierIndex;       // 0-based
+   double riskPercent;
+   double lot;
+   int    tierIndex;
 };
 
-//+------------------------------------------------------------------+
 int CBR_TierIndex(const double equity)
 {
    if(equity < 50.0)   return 0;
@@ -293,38 +296,6 @@ int CBR_TierIndex(const double equity)
    return 7;
 }
 
-//+------------------------------------------------------------------+
-double CBR_TierRiskPercent(const int tier)
-{
-   // Start 50%, step down 5% per tier, floor 15%
-   double risk = 50.0 - (tier * 5.0);
-   if(risk < 15.0)
-      risk = 15.0;
-   return risk;
-}
-
-//+------------------------------------------------------------------+
-int CBR_TierMaxEntries(const int tier)
-{
-   // Tier0-1: 1 entry/position focus; then grow
-   if(tier <= 1) return 1;
-   if(tier == 2) return 2;
-   if(tier == 3) return 2;
-   if(tier == 4) return 3;
-   if(tier == 5) return 3;
-   if(tier == 6) return 4;
-   return 5;
-}
-
-//+------------------------------------------------------------------+
-double CBR_TierLotSteps(const int tier, const double lotStep)
-{
-   // Base 1 step, +1 step each tier (Baloch-like growth feel)
-   const double steps = 1.0 + (double)tier;
-   return steps * lotStep;
-}
-
-//+------------------------------------------------------------------+
 CBRRiskPlan CBR_BuildRiskPlan(const string symbol,
                               const double emergencyStopDistance,
                               const ENUM_ORDER_TYPE orderTypeForMargin,
@@ -332,78 +303,66 @@ CBRRiskPlan CBR_BuildRiskPlan(const string symbol,
 {
    CBRRiskPlan plan;
    const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   plan.tierIndex   = CBR_TierIndex(equity);
-   plan.riskPercent = CBR_TierRiskPercent(plan.tierIndex);
-   plan.maxEntries  = CBR_TierMaxEntries(plan.tierIndex);
+   plan.tierIndex = CBR_TierIndex(equity);
 
-   const double vmin  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
-   const double vstep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
-   const double step  = (vstep > 0.0 ? vstep : vmin);
+   double risk = InpBaseRiskPercent - (plan.tierIndex * InpRiskStepPerTier);
+   if(risk < InpMinRiskPercent)
+      risk = InpMinRiskPercent;
+   plan.riskPercent = risk;
 
-   // Tier lot target from step ladder
-   double lotByTiers = CBR_NormalizeVolume(symbol, CBR_TierLotSteps(plan.tierIndex, step));
-
-   // Risk-based lot from emergency stop distance
+   const double vmin = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
    const double riskMoney = equity * (plan.riskPercent / 100.0);
-   double lotByRisk = CBR_LotForRiskMoney(symbol, riskMoney, emergencyStopDistance);
+   double lot = CBR_LotForRiskMoney(symbol, riskMoney, emergencyStopDistance);
 
-   // Use the more conservative of tier-ladder and risk-money when stop known;
-   // for tiny accounts allow at least min lot if risk room is high.
-   double lot = lotByTiers;
-   if(emergencyStopDistance > 0.0)
-   {
-      // Prefer risk-based, but never below min; also never above margin-safe
-      lot = MathMin(lotByTiers, lotByRisk);
-      if(lot < vmin)
-         lot = vmin;
-      // If high risk% tier and risk-based allows more than tier base, allow up to risk-based
-      // while still capped by max entries philosophy (lot only here)
-      if(plan.riskPercent >= 40.0)
-         lot = MathMax(lotByTiers, MathMin(lotByRisk, lotByTiers * 2.0));
-   }
-
-   const double maxMarginLot = CBR_MaxLotByMargin(symbol, refPrice, orderTypeForMargin, 0.70);
+   const double maxMarginLot = CBR_MaxLotByMargin(symbol, refPrice, orderTypeForMargin, 0.35);
    lot = MathMin(lot, maxMarginLot);
    plan.lot = CBR_NormalizeVolume(symbol, lot);
    if(plan.lot < vmin)
       plan.lot = vmin;
-
    return plan;
 }
 
 //======================================================================
-
-input group "=== Entry ==="
-input double InpBufferDistance     = 1.0;      // Buffer from candle open (price)
-input double InpPendingOffset      = 0.2;      // Pending offset from price
-input long   InpMagic              = 260715;   // Magic number
-
-input group "=== Profit ==="
-input double InpSecureProfit       = 0.2;      // Secure floor (price)
-input double InpTrailDistance      = 0.1;      // Trail distance from current price
-
-input group "=== Risk ==="
-input bool   InpUseSmartRisk       = true;     // Smart risk manager
-input double InpFixedLot           = 0.0;      // Fixed lot (0 = smart/min)
-input double InpEmergencyStopDist  = 5.0;      // Emergency SL distance (price)
-input double InpMaxDailyLossPct    = 80.0;     // Max daily loss % (pause)
-
-input group "=== Runtime ==="
-input int    InpSlippagePoints     = 30;       // Max slippage (points)
-input bool   InpAllowBuy           = true;     // Allow BUY side
-input bool   InpAllowSell          = true;     // Allow SELL side
-
+// Globals
+//======================================================================
 CTrade          g_trade;
 string          g_symbol;
 ENUM_TIMEFRAMES g_tf;
+int             g_atrHandle      = INVALID_HANDLE;
 datetime        g_candleOpenTime = 0;
 double          g_candleOpen     = 0.0;
 int             g_bias           = 0;  // +1 buy, -1 sell, 0 none
 bool            g_dailyLocked    = false;
 double          g_dayStartEquity = 0.0;
 int             g_dayStamp       = -1;
+datetime        g_cooldownUntil  = 0;
+bool            g_hadPosition    = false;
+double          g_atr            = 0.0;
+double          g_distBuffer     = 0.0;
+double          g_distOffset     = 0.0;
+double          g_distSecure     = 0.0;
+double          g_distTrail      = 0.0;
+double          g_distEmergency  = 0.0;
 
-//+------------------------------------------------------------------+
+//======================================================================
+// Forward decls
+//======================================================================
+void RefreshDistances();
+void RefreshCandleContext(const bool force);
+void UpdateDailyLock();
+void EnforceSinglePosition();
+void EnforceSinglePositionNoFlip();
+void ManageEntryPendings();
+void ManageCounterPendingWhileInPosition(const long posType);
+void EnsureBuyStop_OneWayDown();
+void EnsureSellStop_OneWayUp();
+void ManageOpenPosition(const ulong ticket, const long posType);
+double ComputeLot(const ENUM_ORDER_TYPE marginType, const double refPrice);
+bool BufferPassedSell();
+bool BufferPassedBuy();
+bool InCooldown();
+
+//======================================================================
 int OnInit()
 {
    g_symbol = _Symbol;
@@ -414,11 +373,18 @@ int OnInit()
       Print("ERROR: SymbolSelect failed for ", g_symbol);
       return INIT_FAILED;
    }
-   if(InpBufferDistance < 0.0 || InpPendingOffset < 0.0 ||
-      InpSecureProfit < 0.0 || InpTrailDistance < 0.0)
+   if(InpATRPeriod < 1 || InpBufferATRMult < 0.0 || InpOffsetATRMult < 0.0 ||
+      InpSecureATRMult < 0.0 || InpTrailATRMult < 0.0 || InpEmergencyATRMult < 0.0)
    {
-      Print("ERROR: distances must be >= 0");
+      Print("ERROR: invalid ATR / distance inputs");
       return INIT_PARAMETERS_INCORRECT;
+   }
+
+   g_atrHandle = iATR(g_symbol, g_tf, InpATRPeriod);
+   if(g_atrHandle == INVALID_HANDLE)
+   {
+      Print("ERROR: iATR handle failed");
+      return INIT_FAILED;
    }
 
    ENUM_ORDER_TYPE_FILLING filling;
@@ -433,18 +399,26 @@ int OnInit()
    TimeToStruct(TimeCurrent(), dt);
    g_dayStamp = dt.day_of_year;
 
+   RefreshDistances();
    RefreshCandleContext(true);
-   PrintFormat("CandleBiasScalper ready | %s | %s | buffer=%.5f offset=%.5f",
-               g_symbol, EnumToString(g_tf), InpBufferDistance, InpPendingOffset);
+
+   PrintFormat("CandleBiasScalper v2 ready | %s | %s | priorityOnly=%s flip=%s | ATR=%.5f buf=%.5f off=%.5f sec=%.5f trail=%.5f",
+               g_symbol, EnumToString(g_tf),
+               (InpPriorityOnly ? "Y" : "N"),
+               (InpAllowFlip ? "Y" : "N"),
+               g_atr, g_distBuffer, g_distOffset, g_distSecure, g_distTrail);
    return INIT_SUCCEEDED;
 }
 
-//+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   if(g_atrHandle != INVALID_HANDLE)
+   {
+      IndicatorRelease(g_atrHandle);
+      g_atrHandle = INVALID_HANDLE;
+   }
 }
 
-//+------------------------------------------------------------------+
 void OnTick()
 {
    if(!CBR_IsTradeAllowed(g_symbol))
@@ -454,36 +428,87 @@ void OnTick()
    if(g_dailyLocked)
       return;
 
+   RefreshDistances();
    RefreshCandleContext(false);
 
    ulong posTicket = 0;
    long  posType   = -1;
    const bool hasPos = CBR_GetOurPosition(g_symbol, InpMagic, posTicket, posType);
 
-   // Enforce one position (hedging brokers)
-   EnforceSinglePosition();
+   if(g_hadPosition && !hasPos)
+   {
+      if(InpCooldownSeconds > 0)
+         g_cooldownUntil = TimeCurrent() + InpCooldownSeconds;
+      CBR_CancelAllPending(g_trade, g_symbol, InpMagic);
+   }
+   g_hadPosition = hasPos;
+
+   if(InpAllowFlip)
+      EnforceSinglePosition();
+   else
+   {
+      // No flip: if somehow both sides open, close the newer one
+      EnforceSinglePositionNoFlip();
+   }
 
    if(hasPos)
    {
       ManageOpenPosition(posTicket, posType);
-      ManageCounterPendingWhileInPosition(posType);
+      if(!InpPriorityOnly && InpAllowFlip)
+         ManageCounterPendingWhileInPosition(posType);
+      else
+      {
+         // Keep only opposite? No — cancel both pending while in trade (hold clean)
+         CBR_CancelAllPending(g_trade, g_symbol, InpMagic);
+      }
       return;
    }
+
+   if(InCooldown())
+      return;
+
+   if(!CBR_SpreadOk(g_symbol, InpMaxSpreadPoints))
+      return;
 
    ManageEntryPendings();
 }
 
-//+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
       return;
-   EnforceSinglePosition();
+   if(InpAllowFlip)
+      EnforceSinglePosition();
+   else
+      EnforceSinglePositionNoFlip();
 }
 
-//+------------------------------------------------------------------+
+//======================================================================
+void RefreshDistances()
+{
+   g_atr = CBR_ATRValue(g_atrHandle);
+   const double pt = CBR_Point(g_symbol);
+   const double floorDist = pt * 2.0;
+   const double spread = CBR_SpreadPrice(g_symbol);
+
+   g_distBuffer    = CBR_PickDist(InpBufferDistance, g_atr, InpBufferATRMult, floorDist);
+   g_distOffset    = CBR_PickDist(InpPendingOffset, g_atr, InpOffsetATRMult, MathMax(floorDist, spread));
+   g_distTrail     = CBR_PickDist(InpTrailDistance, g_atr, InpTrailATRMult, floorDist);
+   g_distEmergency = CBR_PickDist(InpEmergencyStopDist, g_atr, InpEmergencyATRMult, g_distTrail * 3.0);
+
+   g_distSecure = CBR_PickDist(InpSecureProfit, g_atr, InpSecureATRMult, floorDist);
+   const double minSecure = spread * InpMinSecureSpreadMult + g_distTrail;
+   if(g_distSecure < minSecure)
+      g_distSecure = minSecure;
+}
+
+bool InCooldown()
+{
+   return (g_cooldownUntil > 0 && TimeCurrent() < g_cooldownUntil);
+}
+
 void EnforceSinglePosition()
 {
    ulong buyTicket = 0, sellTicket = 0;
@@ -521,7 +546,6 @@ void EnforceSinglePosition()
 
    if(buyTicket > 0 && sellTicket > 0)
    {
-      // Newest wins (flip)
       if(buyTime >= sellTime)
       {
          g_trade.PositionClose(sellTicket);
@@ -537,7 +561,57 @@ void EnforceSinglePosition()
    }
 }
 
-//+------------------------------------------------------------------+
+void EnforceSinglePositionNoFlip()
+{
+   ulong buyTicket = 0, sellTicket = 0;
+   datetime buyTime = 0, sellTime = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      const ulong t = PositionGetTicket(i);
+      if(t == 0 || !PositionSelectByTicket(t))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != g_symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+
+      const long typ = PositionGetInteger(POSITION_TYPE);
+      const datetime tm = (datetime)PositionGetInteger(POSITION_TIME);
+      if(typ == POSITION_TYPE_BUY)
+      {
+         if(buyTicket == 0 || tm >= buyTime)
+         {
+            buyTicket = t;
+            buyTime = tm;
+         }
+      }
+      else if(typ == POSITION_TYPE_SELL)
+      {
+         if(sellTicket == 0 || tm >= sellTime)
+         {
+            sellTicket = t;
+            sellTime = tm;
+         }
+      }
+   }
+
+   // Keep older (original) position; close accidental opposite
+   if(buyTicket > 0 && sellTicket > 0)
+   {
+      if(buyTime <= sellTime)
+      {
+         g_trade.PositionClose(sellTicket);
+         Print("NO-FLIP: closed newer SELL");
+      }
+      else
+      {
+         g_trade.PositionClose(buyTicket);
+         Print("NO-FLIP: closed newer BUY");
+      }
+   }
+}
+
 void UpdateDailyLock()
 {
    MqlDateTime dt;
@@ -564,7 +638,6 @@ void UpdateDailyLock()
    }
 }
 
-//+------------------------------------------------------------------+
 void RefreshCandleContext(const bool force)
 {
    const datetime t = iTime(g_symbol, g_tf, 0);
@@ -593,19 +666,16 @@ void RefreshCandleContext(const bool force)
    else                        g_bias = 0;
 }
 
-//+------------------------------------------------------------------+
 bool BufferPassedSell()
 {
-   return ((g_candleOpen - SymbolInfoDouble(g_symbol, SYMBOL_BID)) >= InpBufferDistance);
+   return ((g_candleOpen - SymbolInfoDouble(g_symbol, SYMBOL_BID)) >= g_distBuffer);
 }
 
-//+------------------------------------------------------------------+
 bool BufferPassedBuy()
 {
-   return ((SymbolInfoDouble(g_symbol, SYMBOL_ASK) - g_candleOpen) >= InpBufferDistance);
+   return ((SymbolInfoDouble(g_symbol, SYMBOL_ASK) - g_candleOpen) >= g_distBuffer);
 }
 
-//+------------------------------------------------------------------+
 double ComputeLot(const ENUM_ORDER_TYPE marginType, const double refPrice)
 {
    if(InpFixedLot > 0.0)
@@ -613,36 +683,47 @@ double ComputeLot(const ENUM_ORDER_TYPE marginType, const double refPrice)
    if(!InpUseSmartRisk)
       return SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN);
 
-   CBRRiskPlan plan = CBR_BuildRiskPlan(g_symbol, InpEmergencyStopDist, marginType, refPrice);
+   CBRRiskPlan plan = CBR_BuildRiskPlan(g_symbol, g_distEmergency, marginType, refPrice);
    return plan.lot;
 }
 
-//+------------------------------------------------------------------+
 void ManageEntryPendings()
 {
-   // SELL priority (red / down)
+   // SELL priority
    if(g_bias < 0 && InpAllowSell && BufferPassedSell())
    {
       EnsureSellStop_OneWayUp();
-      if(InpAllowBuy)
+      if(InpPriorityOnly)
+         CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_BUY_STOP);
+      else if(InpAllowBuy)
          EnsureBuyStop_OneWayDown();
       else
          CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_BUY_STOP);
       return;
    }
 
-   // BUY priority (green / up)
+   // BUY priority
    if(g_bias > 0 && InpAllowBuy && BufferPassedBuy())
    {
-      EnsureBuyStop_OneWayDown(); // places if none; trails down only if price later falls
-      if(InpAllowSell)
+      EnsureBuyStop_OneWayDown();
+      if(InpPriorityOnly)
+         CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_SELL_STOP);
+      else if(InpAllowSell)
          EnsureSellStop_OneWayUp();
       else
          CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_SELL_STOP);
       return;
    }
 
-   // Not armed: still maintain one-way ratchet on existing pendings
+   // Bias not armed: only ratchet existing priority pending; drop opposite if priority-only
+   if(InpPriorityOnly)
+   {
+      if(g_bias < 0)
+         CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_BUY_STOP);
+      if(g_bias > 0)
+         CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_SELL_STOP);
+   }
+
    ulong ticket; double px;
    if(CBR_FindPending(g_symbol, InpMagic, ORDER_TYPE_BUY_STOP, ticket, px))
       EnsureBuyStop_OneWayDown();
@@ -650,12 +731,10 @@ void ManageEntryPendings()
       EnsureSellStop_OneWayUp();
 }
 
-//+------------------------------------------------------------------+
 void ManageCounterPendingWhileInPosition(const long posType)
 {
    if(posType == POSITION_TYPE_SELL)
    {
-      // Counter BUY only
       CBR_CancelPendingByType(g_trade, g_symbol, InpMagic, ORDER_TYPE_SELL_STOP);
       if(InpAllowBuy)
          EnsureBuyStop_OneWayDown();
@@ -668,45 +747,46 @@ void ManageCounterPendingWhileInPosition(const long posType)
    }
 }
 
-//+------------------------------------------------------------------+
 // BUY STOP above Ask | ratchet DOWN only
-//+------------------------------------------------------------------+
 void EnsureBuyStop_OneWayDown()
 {
    const double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
-   const double minDist = MathMax(InpPendingOffset, CBR_StopsLevelDistance(g_symbol));
+   const double minDist = MathMax(g_distOffset, CBR_StopsLevelDistance(g_symbol));
    const double desired = CBR_NormalizePrice(g_symbol, ask + minDist);
 
    ulong ticket = 0;
    double cur = 0.0;
    if(CBR_FindPending(g_symbol, InpMagic, ORDER_TYPE_BUY_STOP, ticket, cur))
    {
-      // Must remain above Ask; if invalid, delete and re-place
       if(cur <= ask)
       {
          g_trade.OrderDelete(ticket);
+         // fall through to re-place below
       }
-      else if(desired < cur - CBR_Point(g_symbol) * 0.5)
+      else
       {
-         if(!g_trade.OrderModify(ticket, desired, 0.0, 0.0, ORDER_TIME_GTC, 0))
-            Print("BUY_STOP modify fail: ", g_trade.ResultRetcodeDescription());
+         if(desired < cur - CBR_Point(g_symbol) * 0.5)
+         {
+            if(!g_trade.OrderModify(ticket, desired, 0.0, 0.0, ORDER_TIME_GTC, 0))
+               Print("BUY_STOP modify fail: ", g_trade.ResultRetcodeDescription());
+         }
+         return;
       }
-      // never raise
-      return;
    }
 
-   const double lot = ComputeLot(ORDER_TYPE_BUY_STOP, desired);
-   if(!g_trade.BuyStop(lot, desired, g_symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, "CBR BUY_STOP"))
-      Print("BUY_STOP place fail: ", g_trade.ResultRetcodeDescription());
+   if(!CBR_FindPending(g_symbol, InpMagic, ORDER_TYPE_BUY_STOP, ticket, cur))
+   {
+      const double lot = ComputeLot(ORDER_TYPE_BUY_STOP, desired);
+      if(!g_trade.BuyStop(lot, desired, g_symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, "CBR BUY_STOP"))
+         Print("BUY_STOP place fail: ", g_trade.ResultRetcodeDescription());
+   }
 }
 
-//+------------------------------------------------------------------+
 // SELL STOP below Bid | ratchet UP only
-//+------------------------------------------------------------------+
 void EnsureSellStop_OneWayUp()
 {
    const double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
-   const double minDist = MathMax(InpPendingOffset, CBR_StopsLevelDistance(g_symbol));
+   const double minDist = MathMax(g_distOffset, CBR_StopsLevelDistance(g_symbol));
    const double desired = CBR_NormalizePrice(g_symbol, bid - minDist);
 
    ulong ticket = 0;
@@ -717,21 +797,25 @@ void EnsureSellStop_OneWayUp()
       {
          g_trade.OrderDelete(ticket);
       }
-      else if(desired > cur + CBR_Point(g_symbol) * 0.5)
+      else
       {
-         if(!g_trade.OrderModify(ticket, desired, 0.0, 0.0, ORDER_TIME_GTC, 0))
-            Print("SELL_STOP modify fail: ", g_trade.ResultRetcodeDescription());
+         if(desired > cur + CBR_Point(g_symbol) * 0.5)
+         {
+            if(!g_trade.OrderModify(ticket, desired, 0.0, 0.0, ORDER_TIME_GTC, 0))
+               Print("SELL_STOP modify fail: ", g_trade.ResultRetcodeDescription());
+         }
+         return;
       }
-      // never lower
-      return;
    }
 
-   const double lot = ComputeLot(ORDER_TYPE_SELL_STOP, desired);
-   if(!g_trade.SellStop(lot, desired, g_symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, "CBR SELL_STOP"))
-      Print("SELL_STOP place fail: ", g_trade.ResultRetcodeDescription());
+   if(!CBR_FindPending(g_symbol, InpMagic, ORDER_TYPE_SELL_STOP, ticket, cur))
+   {
+      const double lot = ComputeLot(ORDER_TYPE_SELL_STOP, desired);
+      if(!g_trade.SellStop(lot, desired, g_symbol, 0.0, 0.0, ORDER_TIME_GTC, 0, "CBR SELL_STOP"))
+         Print("SELL_STOP place fail: ", g_trade.ResultRetcodeDescription());
+   }
 }
 
-//+------------------------------------------------------------------+
 void ManageOpenPosition(const ulong ticket, const long posType)
 {
    if(!PositionSelectByTicket(ticket))
@@ -745,22 +829,24 @@ void ManageOpenPosition(const ulong ticket, const long posType)
    const double stopsDist = CBR_StopsLevelDistance(g_symbol);
 
    // Emergency SL if missing
-   if(sl <= 0.0 && InpEmergencyStopDist > 0.0)
+   if(sl <= 0.0 && g_distEmergency > 0.0)
    {
       double emSL = (posType == POSITION_TYPE_BUY)
-                    ? CBR_NormalizePrice(g_symbol, openPrice - InpEmergencyStopDist)
-                    : CBR_NormalizePrice(g_symbol, openPrice + InpEmergencyStopDist);
+                    ? CBR_NormalizePrice(g_symbol, openPrice - g_distEmergency)
+                    : CBR_NormalizePrice(g_symbol, openPrice + g_distEmergency);
       g_trade.PositionModify(ticket, emSL, tp);
       return;
    }
 
    if(posType == POSITION_TYPE_BUY)
    {
-      if(bid - openPrice < InpSecureProfit)
+      const double profit = bid - openPrice;
+      if(profit < g_distSecure)
          return;
 
-      double newSL = CBR_NormalizePrice(g_symbol, bid - InpTrailDistance);
-      const double floorSL = CBR_NormalizePrice(g_symbol, openPrice + (InpSecureProfit - InpTrailDistance));
+      double newSL = CBR_NormalizePrice(g_symbol, bid - g_distTrail);
+      // Lock at least a fraction of secured profit (not tiny BE that spread eats)
+      const double floorSL = CBR_NormalizePrice(g_symbol, openPrice + (g_distSecure - g_distTrail) * 0.5);
       if(newSL < floorSL)
          newSL = floorSL;
 
@@ -772,11 +858,12 @@ void ManageOpenPosition(const ulong ticket, const long posType)
    }
    else if(posType == POSITION_TYPE_SELL)
    {
-      if(openPrice - ask < InpSecureProfit)
+      const double profit = openPrice - ask;
+      if(profit < g_distSecure)
          return;
 
-      double newSL = CBR_NormalizePrice(g_symbol, ask + InpTrailDistance);
-      const double floorSL = CBR_NormalizePrice(g_symbol, openPrice - (InpSecureProfit - InpTrailDistance));
+      double newSL = CBR_NormalizePrice(g_symbol, ask + g_distTrail);
+      const double floorSL = CBR_NormalizePrice(g_symbol, openPrice - (g_distSecure - g_distTrail) * 0.5);
       if(newSL > floorSL)
          newSL = floorSL;
 
