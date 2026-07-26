@@ -1,11 +1,23 @@
-# BalochPulse Architecture Audit — COMPLIANCE v2.60
+# BalochPulse Architecture Audit — COMPLIANCE v2.70
 
 Audit date: 2026-07-26  
 File: `MQL5/Experts/EA_BalochPulse.mq5`  
-Build marker on chart: **`BalochPulse COMPLIANCE v2.60`**
+Build marker on chart: **`BalochPulse COMPLIANCE v2.70`**
 
 ## Verdict
-**COMPLIANT** with the locked architecture after fixes below.
+**COMPLIANT** with locked architecture, plus **entry-path fix** so rules can actually produce trades.
+
+## v2.70 entry-path root cause
+No-entry was often caused by:
+1. Flat tester/broker ticks (`dir=0`) → signal always empty
+2. Pullback state never completed
+3. Testing **outside R1 session** (20:00–05:00 local) → by design no new entries
+
+Fixes:
+- netMove fallback when directional ticks are flat
+- M1 bar path feed into adaptive engine
+- micro-pullback completion + same-tick burst
+- clearer session block messaging
 
 ## Rule matrix
 

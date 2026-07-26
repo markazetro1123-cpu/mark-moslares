@@ -1357,9 +1357,9 @@ void BP_UpdateMonitor()
    const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
 
    const string text =
-      "BalochPulse COMPLIANCE v2.60\n" +
+      "BalochPulse COMPLIANCE v2.70\n" +
       "Symbol: " + g_symbol + (g_is_gold ? " (XAUUSD)" : " (US30)") + "\n" +
-      "R1 Session: " + (sessionOk ? "OK" : "BLOCK") + "\n" +
+      "R1 Session: " + (sessionOk ? "OK" : "BLOCK (entries only 20:00-05:00 local)") + "\n" +
       "R2/R3 News: " + (newsBlocked ? newsReason : "OK (FOMC+blackout only)") + "\n" +
       "State: " + BP_StateName(g_state) + " | Mode: " + BP_ModeName(g_mode) + "\n" +
       "Bias: " + BP_BiasName(g_bias) + "\n" +
@@ -1749,7 +1749,7 @@ bool BP_RunComplianceSelfCheck()
    }
 
    if(ok)
-      BP_Log("COMPLIANCE SELF-CHECK PASS v2.60 (R1-R15 mapped)");
+      BP_Log("COMPLIANCE SELF-CHECK PASS v2.70 (R1-R15 mapped + entry-path fix)");
    return ok;
 }
 
@@ -1777,9 +1777,11 @@ int OnInit()
 
    g_state = BP_IDLE;
    g_mode = BP_MODE_NORMAL;
-   g_rule_now = "COMPLIANCE v2.60 ready";
+   g_rule_now = "COMPLIANCE v2.70 ready";
 
-   BP_Log("COMPLIANCE v2.60 ready | R1 session | R2 blackout | R3 FOMC | R4 adaptive tick | R5 candle | R6 pullback | R7 RM | R8 2-3@$30-50 | R9 max15 | R10 same-price | R11 no-martingale | R12 smart-exit | R13 no-spread-filter | R14 XAU/US30");
+   BP_Log("COMPLIANCE v2.70 ready | entry-path fixed (flat-tick + micro-pullback) | R1 session 20:00-05:00 local | R2 blackout | R3 FOMC | R4-R12 active");
+   if(!BP_SessionOK())
+      BP_Log("NOTE: currently OUTSIDE session -> no new entries until local 20:00-05:00 (R1). This is architecture compliance, not a bug.");
    BP_UpdateMonitor();
    return INIT_SUCCEEDED;
 }
