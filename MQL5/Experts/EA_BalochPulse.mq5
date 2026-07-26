@@ -24,8 +24,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "2.60"
-#property description "BalochPulse COMPLIANCE v2.60 — audited architecture behavior"
+#property version   "2.70"
+#property description "BalochPulse COMPLIANCE v2.70 — entry-path fix (signal/pullback) + architecture rules"
 
 #include <Trade/Trade.mqh>
 
@@ -59,8 +59,8 @@ const int    BP_TICK_CAP           = 1200;
 const int    BP_MIN_TICKS          = 6;
 const int    BP_WIN_MIN_SEC        = 2;
 const int    BP_WIN_MAX_SEC        = 60;
-const int    BP_SETUP_EXPIRE_SEC   = 45;
-const int    BP_COOLDOWN_SEC       = 3;
+const int    BP_SETUP_EXPIRE_SEC   = 90;
+const int    BP_COOLDOWN_SEC       = 2;
 const int    BP_FOMC_BLOCK_MIN     = 45;
 const int    BP_MEMORY_SIZE        = 12;
 const double BP_DD_DEFENSIVE       = 1.5;
@@ -142,6 +142,7 @@ int            g_tick_head  = 0;
 int            g_tick_count = 0;
 double         g_last_mid   = 0.0;
 bool           g_tick_bootstrapped = false;
+datetime       g_last_m1_feed      = 0;
 
 ENUM_BP_STATE  g_state = BP_IDLE;
 ENUM_BP_BIAS   g_bias  = BP_BIAS_NONE;
@@ -572,7 +573,7 @@ void BP_PushOneTick(const double mid, const long time_ms)
 
 void BP_BootstrapTicksFromM1Once()
 {
-   // Only bootstrap empty buffer once (tester/sparse start). Never every tick.
+   // Only bootstrap empty buffer once (tester/sparse start).
    if(g_tick_bootstrapped || g_tick_count >= BP_MIN_TICKS)
       return;
 
@@ -588,6 +589,47 @@ void BP_BootstrapTicksFromM1Once()
    g_tick_bootstrapped = true;
 }
 
+void BP_FeedNewM1BarPath()
+{
+   // On each new M1 bar, append OHLC path so R4 still sees movement
+   // even when broker/tester ticks are flat (dir=0). Architecture stays adaptive.
+   const datetime barTime = iTime(g_symbol, PERIOD_M1, 1);
+   if(barTime <= 0 || barTime == g_last_m1_feed)
+      return;
+   g_last_m1_feed = barTime;
+
+   double o[], h[], l[], c[];
+   ArraySetAsSeries(o, true);
+   ArraySetAsSeries(h, true);
+   ArraySetAsSeries(l, true);
+   ArraySetAsSeries(c, true);
+   if(CopyOpen(g_symbol, PERIOD_M1, 1, 1, o) < 1)
+      return;
+   if(CopyHigh(g_symbol, PERIOD_M1, 1, 1, h) < 1)
+      return;
+   if(CopyLow(g_symbol, PERIOD_M1, 1, 1, l) < 1)
+      return;
+   if(CopyClose(g_symbol, PERIOD_M1, 1, 1, c) < 1)
+      return;
+
+   const long base_ms = (long)barTime * 1000;
+   // path preserves direction inside the minute
+   if(c[0] >= o[0])
+   {
+      BP_PushOneTick(o[0], base_ms + 0);
+      BP_PushOneTick(l[0], base_ms + 15000);
+      BP_PushOneTick(h[0], base_ms + 30000);
+      BP_PushOneTick(c[0], base_ms + 45000);
+   }
+   else
+   {
+      BP_PushOneTick(o[0], base_ms + 0);
+      BP_PushOneTick(h[0], base_ms + 15000);
+      BP_PushOneTick(l[0], base_ms + 30000);
+      BP_PushOneTick(c[0], base_ms + 45000);
+   }
+}
+
 void BP_PushLiveTick()
 {
    MqlTick tick;
@@ -597,6 +639,7 @@ void BP_PushLiveTick()
       BP_PushOneTick(mid, (long)tick.time_msc);
    }
    BP_BootstrapTicksFromM1Once();
+   BP_FeedNewM1BarPath();
 }
 
 bool BP_GetTick(const int ageFromNewest, TickSample &out)
@@ -687,34 +730,61 @@ AdaptiveSignal BP_BuildSignal()
    if(used < BP_MIN_TICKS)
       return sig;
 
-   const int directional = up + down;
-   if(directional <= 0)
-      return sig;
-
    sig.ticksUsed = used;
-   sig.upBias = (double)up / (double)directional;
-   sig.downBias = (double)down / (double)directional;
    sig.netMove = newest.mid - firstMid;
 
-   double thr = 0.62;
+   const int directional = up + down;
+   if(directional > 0)
+   {
+      sig.upBias = (double)up / (double)directional;
+      sig.downBias = (double)down / (double)directional;
+   }
+   else
+   {
+      // ENTRY FIX: flat dir ticks are common in tester/bridging.
+      // Fall back to netMove pressure so R4 can still form bias.
+      if(sig.netMove > 0.0)
+      {
+         sig.upBias = 0.60;
+         sig.downBias = 0.40;
+      }
+      else if(sig.netMove < 0.0)
+      {
+         sig.upBias = 0.40;
+         sig.downBias = 0.60;
+      }
+      else
+      {
+         sig.valid = true; // ticks exist but no bias yet
+         return sig;
+      }
+   }
+
+   double thr = 0.58;
    if(tps >= 5.0)
-      thr = 0.55;
+      thr = 0.53;
    else if(tps >= 2.5)
-      thr = 0.58;
+      thr = 0.55;
    else if(tps < 1.0)
-      thr = 0.66;
+      thr = 0.60;
    sig.threshold = thr;
 
-   const double minMove = unit * 0.20;
+   const double minMove = unit * 0.10;
    if(sig.upBias >= thr && sig.netMove >= minMove)
       sig.bias = BP_BIAS_BUY;
    else if(sig.downBias >= thr && sig.netMove <= -minMove)
+      sig.bias = BP_BIAS_SELL;
+   else if(sig.netMove >= minMove * 1.5)
+      sig.bias = BP_BIAS_BUY;
+   else if(sig.netMove <= -minMove * 1.5)
       sig.bias = BP_BIAS_SELL;
 
    const double imb = MathMax(sig.upBias, sig.downBias);
    const double moveScore = BP_ClampD(MathAbs(sig.netMove) / MathMax(unit, BP_Point()), 0.0, 2.0) / 2.0;
    const double imbScore = BP_ClampD((imb - 0.50) / 0.30, 0.0, 1.0);
    sig.strength = BP_ClampD(0.55 * imbScore + 0.45 * moveScore, 0.0, 1.0);
+   if(sig.bias != BP_BIAS_NONE && sig.strength < 0.35)
+      sig.strength = 0.35; // enough to arm impulse when bias exists
    sig.valid = true;
    return sig;
 }
@@ -734,29 +804,28 @@ bool BP_CandleAgrees(const ENUM_BP_BIAS bias)
    ArraySetAsSeries(lows, true);
 
    if(CopyOpen(g_symbol, PERIOD_CURRENT, 0, 3, opens) < 3)
-      return false;
+      return true; // do not hard-block on missing candle data
    if(CopyClose(g_symbol, PERIOD_CURRENT, 0, 3, closes) < 3)
-      return false;
+      return true;
    if(CopyHigh(g_symbol, PERIOD_CURRENT, 0, 3, highs) < 3)
-      return false;
+      return true;
    if(CopyLow(g_symbol, PERIOD_CURRENT, 0, 3, lows) < 3)
-      return false;
+      return true;
 
-   const double body0 = closes[0] - opens[0];
    const double body1 = closes[1] - opens[1];
    const double range1 = MathMax(BP_Point(), highs[1] - lows[1]);
    const double closePos = (closes[1] - lows[1]) / range1;
 
+   // Soft agree: only veto extreme opposite rejection
    if(bias == BP_BIAS_BUY)
    {
-      if(body1 < -range1 * 0.70 && closePos < 0.22)
+      if(body1 < -range1 * 0.85 && closePos < 0.15)
          return false;
-      return (body1 >= 0.0 || body0 >= 0.0 || closePos >= 0.50);
+      return true;
    }
-
-   if(body1 > range1 * 0.70 && closePos > 0.78)
+   if(body1 > range1 * 0.85 && closePos > 0.85)
       return false;
-   return (body1 <= 0.0 || body0 <= 0.0 || closePos <= 0.50);
+   return true;
 }
 
 bool BP_CandleThreat(const ENUM_BP_BIAS openBias)
@@ -1464,7 +1533,8 @@ void BP_ProcessSetup(const AdaptiveSignal &sig)
          g_impulse_extreme = mid;
 
       g_impulse_move = MathMax(g_impulse_move, MathAbs(mid - g_impulse_start));
-      if(g_impulse_move >= BP_Unit() * 0.20)
+      // Also accept impulse if signal strength confirms continuation
+      if(g_impulse_move >= BP_Unit() * 0.08 || (sig.bias == g_bias && sig.strength >= 0.45 && g_impulse_move >= BP_Unit() * 0.04))
       {
          g_state = BP_PULLBACK;
          g_pullback_ext = mid;
@@ -1490,23 +1560,26 @@ void BP_ProcessSetup(const AdaptiveSignal &sig)
             g_pullback_ext = mid;
 
          const double pullback = g_impulse_extreme - mid;
-         if(pullback >= unit * 1.25)
+         if(pullback >= unit * 1.50)
          {
             g_rule_now = "R6 pullback too deep";
             BP_ResetSetup(false);
             g_state = BP_IDLE;
             return;
          }
-         if(pullback >= unit * 0.12)
+         // micro-pullback OR opposite pressure counts as pullback (R6)
+         if(pullback >= unit * 0.04 || (sig.valid && sig.downBias >= 0.55))
             g_pullback_seen = true;
 
-         if(g_pullback_seen &&
-            sig.bias == BP_BIAS_BUY &&
-            mid > g_pullback_ext + unit * 0.04 &&
-            BP_CandleAgrees(BP_BIAS_BUY))
+         const bool resumed = (mid > g_pullback_ext + unit * 0.015) ||
+                              (sig.bias == BP_BIAS_BUY && sig.strength >= 0.40);
+         if(g_pullback_seen && resumed && BP_CandleAgrees(BP_BIAS_BUY))
          {
             g_state = BP_BURST;
             g_rule_now = "R6 pullback done -> BURST";
+            BP_FireSamePriceBurst(sig); // enter same tick when ready
+            if(BP_CountPositions() > 0)
+               g_state = BP_MANAGE;
          }
          else
          {
@@ -1521,23 +1594,25 @@ void BP_ProcessSetup(const AdaptiveSignal &sig)
             g_pullback_ext = mid;
 
          const double pullback = mid - g_impulse_extreme;
-         if(pullback >= unit * 1.25)
+         if(pullback >= unit * 1.50)
          {
             g_rule_now = "R6 pullback too deep";
             BP_ResetSetup(false);
             g_state = BP_IDLE;
             return;
          }
-         if(pullback >= unit * 0.12)
+         if(pullback >= unit * 0.04 || (sig.valid && sig.upBias >= 0.55))
             g_pullback_seen = true;
 
-         if(g_pullback_seen &&
-            sig.bias == BP_BIAS_SELL &&
-            mid < g_pullback_ext - unit * 0.04 &&
-            BP_CandleAgrees(BP_BIAS_SELL))
+         const bool resumed = (mid < g_pullback_ext - unit * 0.015) ||
+                              (sig.bias == BP_BIAS_SELL && sig.strength >= 0.40);
+         if(g_pullback_seen && resumed && BP_CandleAgrees(BP_BIAS_SELL))
          {
             g_state = BP_BURST;
             g_rule_now = "R6 pullback done -> BURST";
+            BP_FireSamePriceBurst(sig);
+            if(BP_CountPositions() > 0)
+               g_state = BP_MANAGE;
          }
          else
          {
@@ -1549,6 +1624,7 @@ void BP_ProcessSetup(const AdaptiveSignal &sig)
 
    if(g_state == BP_BURST)
    {
+      // Keep g_bias for burst even if momentary signal flicker is NONE
       if(sig.bias != BP_BIAS_NONE && sig.bias != g_bias)
       {
          if(BP_CountPositions() > 0)
