@@ -1,6 +1,7 @@
 # EA_OpenColorPending — Full Design v2.00
 
-**Status:** Confirmed design — implemented in `EA_OpenColorPending.mq5` v2.00  
+**Status:** Confirmed design — implemented in `EA_OpenColorPending.mq5` v2.10  
+**v2.10 adds:** adjustable RR secure inputs + session time filter  
 **Symbol scope:** XAUUSD + US30  
 **Style:** Single-file MQL5 Expert Advisor  
 **Kept from previous EA:** Dynamic lot by equity, dynamic entries (max 15), no martingale, emergency SL, position trail SL after fill
@@ -315,10 +316,30 @@ On deal out:
 
 ---
 
-## 15. Non-goals (for this version)
+## 15. Risk Reward secure (v2.10 inputs)
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpSecureTrigger` | 1.0 | Start securing only when unrealized profit ≥ this price distance |
+| `InpSecureLock` | 1.0 | Move SL to lock at least this much profit |
+| `InpTrailStep` | 0 | After lock, trail by this step (`0` = use SecureLock) |
+
+Example US30: trigger `1.0`, lock `2.0` → when +1.0 in profit, SL locks +2.0 only once price allows; then trails by step.
+
+## 16. Session time filter (v2.10)
+
+| Input | Default | Meaning |
+|---|---|---|
+| `InpUseSessionFilter` | true | Enable filter |
+| `InpSessionTZOffsetHrs` | 8 | PH vs GMT |
+| `InpSessionStartHour/Minute` | 20:00 | Start |
+| `InpSessionEndHour/Minute` | 05:00 | End (overnight window OK) |
+
+Outside session: manage open positions only; cancel/block new pendings.
+
+## 17. Non-goals (for this version)
 
 - No news filter
-- No session filter
 - No martingale / grid multiply
 - No multi-symbol basket
 - No chase of extremes away from open (BUY never raises; SELL never lowers)

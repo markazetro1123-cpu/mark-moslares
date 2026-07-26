@@ -1,17 +1,17 @@
 //+------------------------------------------------------------------+
 //| EA_OpenColorPending.mq5                                          |
-//| Open-Color Pending Scalper v2.00                                 |
+//| Open-Color Pending Scalper v2.10                                 |
 //| Design: DESIGN_OpenColorPending.md                               |
 //|                                                                  |
 //| GREEN: BUY @ high, trail DOWN only, floor=open                   |
 //| RED:   SELL @ low, trail UP only, ceiling=open                   |
-//| Delay 5m anti-fakeout | Buffer>=3 opposite pending @ open        |
-//| Dynamic lot + dynamic entries | Emergency + trail SL             |
+//| Delay 5m | Buffer opposite@open | Adjustable RR secure           |
+//| Session time filter | Dynamic lot/entries | Emergency SL         |
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "2.00"
-#property description "OpenColor v2.00: delay, one-way pending trail, buffer@open, dynamic lot/entries"
+#property version   "2.10"
+#property description "OpenColor v2.10: RR inputs, session filter, delay, one-way pending trail"
 
 #include <Trade/Trade.mqh>
 
@@ -27,12 +27,24 @@ input int    InpSlippagePoints          = 40;     // Deviation points
 input bool   InpAllowBuy                = true;   // Allow BUY
 input bool   InpAllowSell               = true;   // Allow SELL
 
+input group "=== Session Clock (PH default) ==="
+input bool   InpUseSessionFilter        = true;   // Enable session time filter
+input int    InpSessionTZOffsetHrs      = 8;      // Local TZ vs GMT (PH=8)
+input int    InpSessionStartHour        = 20;     // Session start hour
+input int    InpSessionStartMinute      = 0;      // Session start minute
+input int    InpSessionEndHour          = 5;      // Session end hour
+input int    InpSessionEndMinute        = 0;      // Session end minute
+
 input group "=== Structure / Buffer ==="
 input int    InpStructureDelayMinutes   = 5;      // Anti-fakeout delay (minutes)
 input double InpOpenBuffer              = 3.0;    // Buffer distance (price; US30=3.0)
 
-input group "=== Trail / Stops ==="
-input double InpTrailDistance           = 0.0;    // Position trail (0=auto)
+input group "=== Risk Reward / Secure ==="
+input double InpSecureTrigger           = 1.0;    // Activate secure when profit >= this
+input double InpSecureLock              = 1.0;    // Locked profit once triggered (was 0.5)
+input double InpTrailStep               = 0.0;    // Trail step after lock (0=use SecureLock)
+
+input group "=== Stops / Pending ==="
 input double InpEmergencySL             = 0.0;    // Emergency SL (0=auto)
 input double InpPendingOffset           = 0.0;    // Pending gap (0=auto)
 
@@ -215,13 +227,29 @@ bool OCP_ValidateSymbol()
    return true;
 }
 
-double OCP_TrailDistance()
+double OCP_SecureTrigger()
 {
-   if(InpTrailDistance > 0.0)
-      return InpTrailDistance;
+   if(InpSecureTrigger > 0.0)
+      return InpSecureTrigger;
    if(g_is_us30)
-      return MathMax(0.5, 50.0 * OCP_Point());
-   return MathMax(0.20, 50.0 * OCP_Point());
+      return 1.0;
+   return 0.20;
+}
+
+double OCP_SecureLock()
+{
+   if(InpSecureLock > 0.0)
+      return InpSecureLock;
+   if(g_is_us30)
+      return 1.0;
+   return 0.20;
+}
+
+double OCP_TrailStep()
+{
+   if(InpTrailStep > 0.0)
+      return InpTrailStep;
+   return OCP_SecureLock();
 }
 
 double OCP_EmergencyDistance()
@@ -231,6 +259,33 @@ double OCP_EmergencyDistance()
    if(g_is_us30)
       return MathMax(25.0, 800.0 * OCP_Point());
    return MathMax(3.0, 800.0 * OCP_Point());
+}
+
+int OCP_LocalMinuteOfDay()
+{
+   datetime local = TimeGMT() + (datetime)(InpSessionTZOffsetHrs * 3600);
+   MqlDateTime dt;
+   TimeToStruct(local, dt);
+   return dt.hour * 60 + dt.min;
+}
+
+bool OCP_InMinuteWindow(const int nowMin, const int startMin, const int endMin)
+{
+   if(startMin == endMin)
+      return true; // same start/end = always open
+   if(startMin < endMin)
+      return (nowMin >= startMin && nowMin < endMin);
+   return (nowMin >= startMin || nowMin < endMin);
+}
+
+bool OCP_SessionOK()
+{
+   if(!InpUseSessionFilter)
+      return true;
+   int nowMin = OCP_LocalMinuteOfDay();
+   int a = InpSessionStartHour * 60 + InpSessionStartMinute;
+   int b = InpSessionEndHour * 60 + InpSessionEndMinute;
+   return OCP_InMinuteWindow(nowMin, a, b);
 }
 
 double OCP_PendingGap()
@@ -815,15 +870,18 @@ bool OCP_ManageBuyAtOpen(const double candleOpen)
 }
 
 //======================================================================
-// POSITION TRAIL / EMERGENCY SL
+// POSITION EMERGENCY SL + ADJUSTABLE RR SECURE / TRAIL
 //======================================================================
 void OCP_ManageOpenPositions()
 {
-   double trail = OCP_TrailDistance();
+   double trigger = OCP_SecureTrigger();
+   double lockDist = OCP_SecureLock();
+   double trailStep = OCP_TrailStep();
    double emergency = MathMax(OCP_EmergencyDistance(), OCP_StopsDistance() + 2.0 * OCP_Point());
    double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
    double stopLevel = OCP_StopsDistance();
+   double eps = OCP_Point() * 0.1;
 
    OCP_PrepareTrade();
 
@@ -846,51 +904,62 @@ void OCP_ManageOpenPositions()
 
       if(posType == POSITION_TYPE_SELL)
       {
-         double workSL = curSL;
-         if(workSL <= 0.0)
-            workSL = OCP_NormPrice(openPrice + emergency);
+         if(curSL <= 0.0)
+         {
+            double emSL = OCP_NormPrice(openPrice + emergency);
+            g_trade.PositionModify(ticket, emSL, curTP);
+            curSL = emSL;
+         }
 
-         if(bid < openPrice)
-         {
-            double newSL = OCP_NormPrice(bid + trail);
-            if(newSL < workSL - (OCP_Point() * 0.1))
-            {
-               if(newSL > bid + stopLevel)
-               {
-                  if(g_trade.PositionModify(ticket, newSL, curTP))
-                     OCP_Log("SELL trail SL -> " + DoubleToString(newSL, OCP_Digits()));
-               }
-            }
-         }
-         else
-         {
-            if(curSL <= 0.0)
-               g_trade.PositionModify(ticket, OCP_NormPrice(openPrice + emergency), curTP);
-         }
+         double profitDist = openPrice - bid;
+         if(profitDist < trigger)
+            continue;
+
+         // Lock at least SecureLock profit, then trail by TrailStep
+         double lockSL = OCP_NormPrice(openPrice - lockDist);
+         double trailSL = OCP_NormPrice(bid + trailStep);
+         double newSL = lockSL;
+         if(trailSL < newSL)
+            newSL = trailSL;
+
+         if(newSL >= bid + stopLevel)
+            continue;
+         if(curSL > 0.0 && newSL >= curSL - eps)
+            continue;
+
+         if(g_trade.PositionModify(ticket, newSL, curTP))
+            OCP_Log("SELL secure/trail SL -> " + DoubleToString(newSL, OCP_Digits()) +
+                    " (trigger=" + DoubleToString(trigger, OCP_Digits()) +
+                    " lock=" + DoubleToString(lockDist, OCP_Digits()) + ")");
       }
       else if(posType == POSITION_TYPE_BUY)
       {
-         double workSL = curSL;
-         if(workSL <= 0.0)
-            workSL = OCP_NormPrice(openPrice - emergency);
+         if(curSL <= 0.0)
+         {
+            double emSL = OCP_NormPrice(openPrice - emergency);
+            g_trade.PositionModify(ticket, emSL, curTP);
+            curSL = emSL;
+         }
 
-         if(ask > openPrice)
-         {
-            double newSL = OCP_NormPrice(ask - trail);
-            if(newSL > workSL + (OCP_Point() * 0.1))
-            {
-               if(newSL < ask - stopLevel)
-               {
-                  if(g_trade.PositionModify(ticket, newSL, curTP))
-                     OCP_Log("BUY trail SL -> " + DoubleToString(newSL, OCP_Digits()));
-               }
-            }
-         }
-         else
-         {
-            if(curSL <= 0.0)
-               g_trade.PositionModify(ticket, OCP_NormPrice(openPrice - emergency), curTP);
-         }
+         double profitDist = ask - openPrice;
+         if(profitDist < trigger)
+            continue;
+
+         double lockSL = OCP_NormPrice(openPrice + lockDist);
+         double trailSL = OCP_NormPrice(ask - trailStep);
+         double newSL = lockSL;
+         if(trailSL > newSL)
+            newSL = trailSL;
+
+         if(newSL > ask - stopLevel)
+            continue;
+         if(curSL > 0.0 && newSL <= curSL + eps)
+            continue;
+
+         if(g_trade.PositionModify(ticket, newSL, curTP))
+            OCP_Log("BUY secure/trail SL -> " + DoubleToString(newSL, OCP_Digits()) +
+                    " (trigger=" + DoubleToString(trigger, OCP_Digits()) +
+                    " lock=" + DoubleToString(lockDist, OCP_Digits()) + ")");
       }
    }
 }
@@ -918,7 +987,8 @@ void OCP_UpdateComment(const int candleColor,
                        const double low0,
                        const double prevHigh,
                        const double prevLow,
-                       const bool delayActive)
+                       const bool delayActive,
+                       const bool sessionOk)
 {
    string colorName = "FLAT";
    if(candleColor == OCP_RED)
@@ -942,17 +1012,30 @@ void OCP_UpdateComment(const int candleColor,
    if(OCP_BufferOk(open0))
       bufText = "YES";
 
-   string line1 = "OpenColorPending v2.00";
-   string line2 = "Symbol: " + g_symbol + family;
+   string sessionText = "OFF";
+   if(InpUseSessionFilter)
+   {
+      if(sessionOk)
+         sessionText = "OK";
+      else
+         sessionText = "BLOCK";
+   }
+
+   string line1 = "OpenColorPending v2.10";
+   string line2 = "Symbol: " + g_symbol + family + " | Session: " + sessionText;
    string line3 = "Open: " + DoubleToString(open0, OCP_Digits()) + " | Color: " + colorName;
    string line4 = "Current H/L: " + DoubleToString(high0, OCP_Digits()) + " / " + DoubleToString(low0, OCP_Digits());
    string line5 = "Previous H/L: " + DoubleToString(prevHigh, OCP_Digits()) + " / " + DoubleToString(prevLow, OCP_Digits());
    string line6 = "Delay: " + delayText + " | BufferOK: " + bufText +
                   " (" + DoubleToString(OCP_BufferDistance(), OCP_Digits()) + ")";
-   string line7 = "Pos: " + IntegerToString(OCP_CountPositions()) +
+   string line7 = "RR trigger/lock/step: " +
+                  DoubleToString(OCP_SecureTrigger(), OCP_Digits()) + " / " +
+                  DoubleToString(OCP_SecureLock(), OCP_Digits()) + " / " +
+                  DoubleToString(OCP_TrailStep(), OCP_Digits());
+   string line8 = "Pos: " + IntegerToString(OCP_CountPositions()) +
                   " / Allow: " + IntegerToString(OCP_AllowedEntries()) +
-                  " | Pend: " + IntegerToString(OCP_CountAllPendings());
-   string line8 = "CycleLot: " + lotText + " | Trail: " + DoubleToString(OCP_TrailDistance(), OCP_Digits());
+                  " | Pend: " + IntegerToString(OCP_CountAllPendings()) +
+                  " | Lot: " + lotText;
 
    Comment(line1, "\n", line2, "\n", line3, "\n", line4, "\n", line5, "\n", line6, "\n", line7, "\n", line8);
 }
@@ -983,7 +1066,15 @@ void OCP_OnTickLogic()
 
    int candleColor = OCP_DetectCandleColor(open0);
    bool delayActive = (TimeCurrent() < g_delay_until);
-   OCP_UpdateComment(candleColor, open0, high0, low0, high1, low1, delayActive);
+   bool sessionOk = OCP_SessionOK();
+   OCP_UpdateComment(candleColor, open0, high0, low0, high1, low1, delayActive, sessionOk);
+
+   if(!sessionOk)
+   {
+      // Outside session: no new pendings; keep managing open positions only
+      OCP_DeleteAllPendings();
+      return;
+   }
 
    if(delayActive)
       return;
@@ -1067,10 +1158,31 @@ int OnInit()
    if(!OCP_ValidateSymbol())
       return INIT_FAILED;
 
+   if(InpSessionTZOffsetHrs < -12 || InpSessionTZOffsetHrs > 14)
+   {
+      OCP_Log("Invalid InpSessionTZOffsetHrs");
+      return INIT_FAILED;
+   }
+   if(InpSessionStartHour < 0 || InpSessionStartHour > 23 ||
+      InpSessionEndHour < 0 || InpSessionEndHour > 23 ||
+      InpSessionStartMinute < 0 || InpSessionStartMinute > 59 ||
+      InpSessionEndMinute < 0 || InpSessionEndMinute > 59)
+   {
+      OCP_Log("Invalid session clock inputs");
+      return INIT_FAILED;
+   }
+
    OCP_PrepareTrade();
 
-   OCP_Log("Init OK v2.00 | delay=" + IntegerToString(InpStructureDelayMinutes) +
+   string sessionMode = "OFF";
+   if(InpUseSessionFilter)
+      sessionMode = "ON";
+
+   OCP_Log("Init OK v2.10 | delay=" + IntegerToString(InpStructureDelayMinutes) +
            "m | buffer=" + DoubleToString(OCP_BufferDistance(), OCP_Digits()) +
+           " | RR trigger/lock=" + DoubleToString(OCP_SecureTrigger(), OCP_Digits()) +
+           "/" + DoubleToString(OCP_SecureLock(), OCP_Digits()) +
+           " | sessionFilter=" + sessionMode +
            " | symbol=" + g_symbol);
    return INIT_SUCCEEDED;
 }
