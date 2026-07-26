@@ -31,6 +31,15 @@ Copy that one file only → MetaEditor → Compile → attach to chart.
 - Lot/entries grow with equity + signal quality
 - Goal feel: larger wins, small drawdown
 
+## v1.10 entry frequency patch
+Filters loosened so EA is not too quiet:
+- Lower imbalance thresholds (`0.55/0.52`)
+- Pullback **not required** by default (`InpRequirePullback=false`)
+- Candle confirm **off** by default (tick pressure enough)
+- Calendar default = **FOMC only** (`InpBlockHighImpactUSD=false`)
+- Session widened to **8PM–5AM PH**
+- Hard blackouts kept (20:30–20:40 & 21:30–21:40)
+
 ## Risk Manager modes
 - `AGGRESSIVE` — clean strong signal, low DD
 - `NORMAL` — balanced

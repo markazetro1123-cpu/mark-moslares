@@ -971,13 +971,13 @@ ENUM_BP_MODE BP_RiskMode(const AdaptiveSignal &sig, const double floatingPnl)
    int samples = 0;
    const double wr = BP_RecentWinRate(samples);
    const bool strong = (sig.valid && sig.bias != BP_BIAS_NONE &&
-                        MathMax(sig.upBias, sig.downBias) >= sig.threshold + 0.04 &&
-                        MathAbs(sig.netMove) >= BP_MinNetMove() * 1.25);
+                        MathMax(sig.upBias, sig.downBias) >= sig.threshold &&
+                        MathAbs(sig.netMove) >= BP_MinNetMove() * 0.5);
 
-   if(strong && ddPct < InpDdDefensivePct * 0.35 && (samples < 3 || wr >= 0.45) && g_win_streak >= 1)
+   if(strong && ddPct < InpDdDefensivePct * 0.6 && (samples < 3 || wr >= 0.35))
       return BP_MODE_AGGRESSIVE;
 
-   if(strong && ddPct < InpDdDefensivePct * 0.5 && g_loss_streak == 0)
+   if(strong && ddPct < InpDdDefensivePct * 0.75 && g_loss_streak == 0)
       return BP_MODE_AGGRESSIVE;
 
    return BP_MODE_NORMAL;
