@@ -1,7 +1,8 @@
 # EA_OpenColorPending — Full Design v2.00
 
-**Status:** Confirmed design — implemented in `EA_OpenColorPending.mq5` v2.10  
+**Status:** Confirmed design — implemented in `EA_OpenColorPending.mq5` v2.20  
 **v2.10 adds:** adjustable RR secure inputs + session time filter  
+**v2.20 adds:** Counter Buy/Sell inputs; counter uses Stop @ open (fixed Limit bug)  
 **Symbol scope:** XAUUSD + US30  
 **Style:** Single-file MQL5 Expert Advisor  
 **Kept from previous EA:** Dynamic lot by equity, dynamic entries (max 15), no martingale, emergency SL, position trail SL after fill
@@ -147,25 +148,26 @@ Same as buy: emergency SL + trail SL → profit close → cycle again.
 
 ---
 
-## 7. 3-buffer-points rule (opposite pending at OPEN)
+## 7. Counter Buy / Counter Sell @ OPEN (buffer rule)
 
-**Input:** `InpOpenBufferPoints = 3` (points)
+**Inputs:**
+- `InpOpenBuffer = 3.0` (price distance)
+- `InpAllowCounterBuy = true`
+- `InpAllowCounterSell = true`
 
-**Distance:** `|currentPrice - candleOpen|` in points.
+**Distance:** `|currentPrice - candleOpen| >= InpOpenBuffer`
 
-### When GREEN and buffer ≥ 3
-- Place **SELL pending at OPEN price**
-- This is **not** at latest low
-- If buffer **< 3** → **do not** place sell@open
+### When GREEN and buffer OK + CounterSell ON
+- Place **Counter SELL STOP at OPEN** (not latest low)
+- Triggers when price returns down to open
 
-### When RED and buffer ≥ 3
-- Place **BUY pending at OPEN price**
-- This is **not** at latest high
-- If buffer **< 3** → **do not** place buy@open
+### When RED and buffer OK + CounterBuy ON
+- Place **Counter BUY STOP at OPEN** (not latest high)
+- Triggers when price returns up to open
 
 ### Intent
 Main side follows candle color extremes (with one-way trail).  
-Opposite side only appears at **open** when there is enough room (buffer), to avoid noise / fake open fades.
+Counter side only arms at **open** when buffer is large enough (anti-noise).
 
 ### Combined GREEN example
 ```
