@@ -589,7 +589,7 @@ AdaptiveSignal BP_BuildSignal()
       return sig;
 
    // Quick speed estimate from last ~3 seconds
-   TickSample newest, older;
+   TickSample newest;
    if(!BP_GetTick(0, newest)) return sig;
 
    long newest_ms = newest.time_ms;
