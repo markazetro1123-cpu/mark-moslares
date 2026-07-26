@@ -1,0 +1,32 @@
+; ============================================================
+;  PovertyScalperClone - FX Majors / XAUUSD tight scalper preset
+;  Platform: MT5. Load via EA Inputs tab -> Load.
+;
+;  Session hours are BROKER/SERVER time (default ~ London/NY
+;  overlap 12:00-16:00 UTC). Adjust to your broker's GMT offset.
+;  Use a raw/ECN, low-spread account; M1 scalping needs it.
+; ============================================================
+InpMagic=20260725
+InpLots=0.01
+InpMaxPositions=1
+InpMaxSpreadPoints=20
+InpSlippagePoints=10
+InpTakeProfitPts=30
+InpStopLossPts=30
+InpUseTrailing=true
+InpTrailStartPts=15
+InpTrailStepPts=10
+InpEmaFast=8
+InpEmaSlow=21
+InpRsiPeriod=14
+InpRsiBuyLevel=55.0
+InpRsiSellLevel=45.0
+InpMomentumBodyPts=30
+InpUseSession=true
+InpSessionStartHour=13
+InpSessionEndHour=17
+InpTradeFriday=true
+InpFridayStopHour=20
+InpMaxDrawdownPct=20.0
+InpCloseAllOnHalt=false
+InpShowPanel=true
