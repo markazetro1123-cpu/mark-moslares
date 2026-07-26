@@ -1,24 +1,28 @@
-# EA_OpenColorPending
+# EA_OpenColorPending v2.00
 
-**Design (full):** [`DESIGN_OpenColorPending.md`](./DESIGN_OpenColorPending.md) — **v2.00 confirmed**
+**Design:** [`DESIGN_OpenColorPending.md`](./DESIGN_OpenColorPending.md)  
+**EA:** `EA_OpenColorPending.mq5`
 
-**EA file:** `EA_OpenColorPending.mq5` (implementation follows design v2.00)
-
-## Quick summary
-- 5-min structure delay before pending
-- GREEN → BUY pending @ high (trail down only, floor = open)
-- RED → SELL pending @ low (trail up only, ceiling = open)
-- Buffer ≥ 3 points → opposite pending @ **open** only
-- Fill → emergency SL + trail SL
-- Dynamic lot + dynamic entries kept (max 15)
+## Behavior
+1. Wait **5 minutes** after candle open (anti-fakeout)
+2. **GREEN** → BUY pending @ latest high  
+   - trails **down only**  
+   - floor = candle **open** (never chase up)
+3. **RED** → SELL pending @ latest low  
+   - trails **up only**  
+   - ceiling = candle **open** (never chase down)
+4. If `|price - open| >= 3.0` (buffer) → opposite pending **at open**
+5. On fill → emergency SL + trail SL
+6. Dynamic lot + dynamic entries (max 15), no martingale
+7. XAUUSD + US30
 
 ## Install
-1. Use the full `.mq5` from this branch (replace entire file)
-2. MetaEditor Compile → 0 errors / 0 warnings
+1. Download the **full** `.mq5` (replace entire old file)
+2. MetaEditor → Compile → expect **0 errors / 0 warnings**
 3. Attach to XAUUSD or US30 → Algo Trading ON
 
-Raw EA:
+Raw EA:  
 `https://raw.githubusercontent.com/markazetro1123-cpu/mark-moslares/cursor/open-color-pending-b063/MQL5/Experts/EA_OpenColorPending.mq5`
 
-Raw Design:
+Raw Design:  
 `https://raw.githubusercontent.com/markazetro1123-cpu/mark-moslares/cursor/open-color-pending-b063/MQL5/Experts/DESIGN_OpenColorPending.md`

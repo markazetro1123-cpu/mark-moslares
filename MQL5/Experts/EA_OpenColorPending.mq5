@@ -1,21 +1,17 @@
 //+------------------------------------------------------------------+
 //| EA_OpenColorPending.mq5                                          |
-//| Open-Color Pending Scalper v1.20                                 |
-//| Clean MetaEditor build (0 errors / 0 warnings target)            |
+//| Open-Color Pending Scalper v2.00                                 |
+//| Design: DESIGN_OpenColorPending.md                               |
 //|                                                                  |
-//| Strategy:                                                        |
-//|  - Below candle open = RED  -> SELL pending at latest LOW        |
-//|  - Above candle open = GREEN -> BUY pending at latest HIGH       |
-//|  - Track previous candle HIGH / LOW                              |
-//|  - Trail SL after fill (example: 4399 -> 4399.5)                 |
-//|  - After profit -> lock until next candle                        |
-//|  - Emergency SL always on                                        |
-//|  - Dynamic lot + dynamic entries kept                            |
+//| GREEN: BUY @ high, trail DOWN only, floor=open                   |
+//| RED:   SELL @ low, trail UP only, ceiling=open                   |
+//| Delay 5m anti-fakeout | Buffer>=3 opposite pending @ open        |
+//| Dynamic lot + dynamic entries | Emergency + trail SL             |
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.20"
-#property description "OpenColor v1.20 clean: red=sell@low green=buy@high trail dynamic lot/entries"
+#property version   "2.00"
+#property description "OpenColor v2.00: delay, one-way pending trail, buffer@open, dynamic lot/entries"
 
 #include <Trade/Trade.mqh>
 
@@ -23,21 +19,25 @@
 // INPUTS
 //======================================================================
 input group "=== Account / Broker ==="
-input long   InpMagic          = 260728;  // Magic number
-input double InpRiskPercent    = 2.0;     // Risk % for dynamic lot
-input double InpMinLot         = 0.01;    // Minimum lot
-input double InpMaxLotCap      = 1.00;    // Maximum lot cap
-input int    InpSlippagePoints = 40;      // Deviation points
-input bool   InpAllowBuy       = true;    // Allow BUY
-input bool   InpAllowSell      = true;    // Allow SELL
+input long   InpMagic                   = 260728; // Magic number
+input double InpRiskPercent             = 2.0;    // Risk % for dynamic lot
+input double InpMinLot                  = 0.01;   // Minimum lot
+input double InpMaxLotCap               = 1.00;   // Maximum lot cap
+input int    InpSlippagePoints          = 40;     // Deviation points
+input bool   InpAllowBuy                = true;   // Allow BUY
+input bool   InpAllowSell               = true;   // Allow SELL
+
+input group "=== Structure / Buffer ==="
+input int    InpStructureDelayMinutes   = 5;      // Anti-fakeout delay (minutes)
+input double InpOpenBuffer              = 3.0;    // Buffer distance (price; US30=3.0)
 
 input group "=== Trail / Stops ==="
-input double InpTrailDistance  = 0.0;     // Trail distance (0=auto)
-input double InpEmergencySL    = 0.0;     // Emergency SL (0=auto)
-input double InpPendingOffset  = 0.0;     // Pending gap (0=auto)
+input double InpTrailDistance           = 0.0;    // Position trail (0=auto)
+input double InpEmergencySL             = 0.0;    // Emergency SL (0=auto)
+input double InpPendingOffset           = 0.0;    // Pending gap (0=auto)
 
 input group "=== Runtime ==="
-input bool   InpPrintLogs      = true;    // Print logs
+input bool   InpPrintLogs               = true;   // Print logs
 
 //======================================================================
 // CONSTANTS
@@ -46,6 +46,11 @@ const int OCP_MAX_ENTRIES = 15;
 const int OCP_FLAT        = 0;
 const int OCP_GREEN       = 1;
 const int OCP_RED         = 2;
+
+const string OCP_TAG_BUY_MAIN  = "OCP-BM";
+const string OCP_TAG_SELL_MAIN = "OCP-SM";
+const string OCP_TAG_BUY_OPEN  = "OCP-BO";
+const string OCP_TAG_SELL_OPEN = "OCP-SO";
 
 //======================================================================
 // GLOBALS
@@ -56,7 +61,7 @@ bool     g_ready;
 bool     g_is_gold;
 bool     g_is_us30;
 datetime g_bar_time;
-bool     g_profit_lock;
+datetime g_delay_until;
 double   g_cycle_lot;
 string   g_last_log;
 
@@ -242,6 +247,15 @@ double OCP_PendingGap()
    return softMin;
 }
 
+double OCP_BufferDistance()
+{
+   if(InpOpenBuffer > 0.0)
+      return InpOpenBuffer;
+   if(g_is_us30)
+      return 3.0;
+   return 0.30;
+}
+
 //======================================================================
 // DYNAMIC LOT / ENTRIES
 //======================================================================
@@ -320,7 +334,7 @@ double OCP_CalcLot(const ENUM_ORDER_TYPE orderType, const double price)
 //======================================================================
 // CANDLE
 //======================================================================
-bool OCP_CopyBar(const int shift, datetime &barTime, double &open, double &high, double &low)
+bool OCP_CopyBar(const int shift, datetime &barTime, double &openPrice, double &highPrice, double &lowPrice)
 {
    datetime times[];
    double opens[];
@@ -342,13 +356,13 @@ bool OCP_CopyBar(const int shift, datetime &barTime, double &open, double &high,
       return false;
 
    barTime = times[0];
-   open = opens[0];
-   high = highs[0];
-   low = lows[0];
+   openPrice = opens[0];
+   highPrice = highs[0];
+   lowPrice = lows[0];
    return true;
 }
 
-int OCP_DetectColor(const double openPrice)
+int OCP_DetectCandleColor(const double openPrice)
 {
    double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
@@ -363,8 +377,16 @@ int OCP_DetectColor(const double openPrice)
    return OCP_FLAT;
 }
 
+bool OCP_BufferOk(const double openPrice)
+{
+   double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
+   double mid = (bid + ask) * 0.5;
+   return (MathAbs(mid - openPrice) >= OCP_BufferDistance());
+}
+
 //======================================================================
-// COUNTS / PENDING HELPERS
+// COUNTS / ORDER HELPERS
 //======================================================================
 int OCP_CountPositions()
 {
@@ -385,61 +407,18 @@ int OCP_CountPositions()
    return count;
 }
 
-int OCP_CountPendingsByType(const ENUM_ORDER_TYPE orderType)
+bool OCP_OrderIsOurs(const ulong ticket)
 {
-   int count = 0;
-   for(int i = OrdersTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = OrderGetTicket(i);
-      if(ticket == 0)
-         continue;
-      if(!OrderSelect(ticket))
-         continue;
-      if(OrderGetString(ORDER_SYMBOL) != g_symbol)
-         continue;
-      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic)
-         continue;
-      if((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) != orderType)
-         continue;
-      count++;
-   }
-   return count;
+   if(!OrderSelect(ticket))
+      return false;
+   if(OrderGetString(ORDER_SYMBOL) != g_symbol)
+      return false;
+   if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic)
+      return false;
+   return true;
 }
 
-int OCP_CountAllPendings()
-{
-   int n = 0;
-   n += OCP_CountPendingsByType(ORDER_TYPE_BUY_STOP);
-   n += OCP_CountPendingsByType(ORDER_TYPE_SELL_STOP);
-   n += OCP_CountPendingsByType(ORDER_TYPE_BUY_LIMIT);
-   n += OCP_CountPendingsByType(ORDER_TYPE_SELL_LIMIT);
-   return n;
-}
-
-void OCP_DeletePendings(const bool deleteBuys, const bool deleteSells)
-{
-   for(int i = OrdersTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = OrderGetTicket(i);
-      if(ticket == 0)
-         continue;
-      if(!OrderSelect(ticket))
-         continue;
-      if(OrderGetString(ORDER_SYMBOL) != g_symbol)
-         continue;
-      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic)
-         continue;
-
-      ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
-      bool isBuy = (type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_BUY_LIMIT);
-      bool isSell = (type == ORDER_TYPE_SELL_STOP || type == ORDER_TYPE_SELL_LIMIT);
-
-      if((deleteBuys && isBuy) || (deleteSells && isSell))
-         g_trade.OrderDelete(ticket);
-   }
-}
-
-bool OCP_FindPending(const ENUM_ORDER_TYPE orderType, ulong &ticket, double &price)
+bool OCP_FindByTag(const string tag, ulong &ticket, double &price)
 {
    ticket = 0;
    price = 0.0;
@@ -449,13 +428,9 @@ bool OCP_FindPending(const ENUM_ORDER_TYPE orderType, ulong &ticket, double &pri
       ulong t = OrderGetTicket(i);
       if(t == 0)
          continue;
-      if(!OrderSelect(t))
+      if(!OCP_OrderIsOurs(t))
          continue;
-      if(OrderGetString(ORDER_SYMBOL) != g_symbol)
-         continue;
-      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic)
-         continue;
-      if((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) != orderType)
+      if(OrderGetString(ORDER_COMMENT) != tag)
          continue;
 
       ticket = t;
@@ -465,139 +440,135 @@ bool OCP_FindPending(const ENUM_ORDER_TYPE orderType, ulong &ticket, double &pri
    return false;
 }
 
+void OCP_DeleteByTag(const string tag)
+{
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(!OCP_OrderIsOurs(ticket))
+         continue;
+      if(OrderGetString(ORDER_COMMENT) != tag)
+         continue;
+      g_trade.OrderDelete(ticket);
+   }
+}
+
+void OCP_DeleteAllPendings()
+{
+   OCP_DeleteByTag(OCP_TAG_BUY_MAIN);
+   OCP_DeleteByTag(OCP_TAG_SELL_MAIN);
+   OCP_DeleteByTag(OCP_TAG_BUY_OPEN);
+   OCP_DeleteByTag(OCP_TAG_SELL_OPEN);
+}
+
+int OCP_CountAllPendings()
+{
+   int count = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(!OCP_OrderIsOurs(ticket))
+         continue;
+      count++;
+   }
+   return count;
+}
+
 bool OCP_ModifyPending(const ulong ticket, const double price, const double sl)
 {
-   // Compatible OrderModify signature for CTrade
    return g_trade.OrderModify(ticket, price, sl, 0.0, ORDER_TIME_GTC, 0);
 }
 
-//======================================================================
-// ENTRY ENGINE
-//======================================================================
-bool OCP_PlaceOrMoveSellStop(const double latestLow, const double prevHigh)
+bool OCP_RoomForNewLegs()
 {
-   if(!InpAllowSell)
-      return false;
-   if(!OCP_TradeAllowed())
-      return false;
-
-   double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
-   double gap = OCP_PendingGap();
-
-   double price = OCP_NormPrice(latestLow);
-   double maxValidSell = OCP_NormPrice(bid - MathMax(gap, OCP_StopsDistance() + OCP_Point()));
-   if(price > maxValidSell)
-      price = maxValidSell;
-
-   double emergency = MathMax(OCP_EmergencyDistance(), OCP_StopsDistance() + 2.0 * OCP_Point());
-   double sl = OCP_NormPrice(price + emergency);
-   if(prevHigh > 0.0)
-      sl = OCP_NormPrice(MathMax(sl, prevHigh + gap));
-
    int allowed = OCP_AllowedEntries();
    int openCount = OCP_CountPositions();
-   int room = allowed - openCount;
-   if(room <= 0)
-      return false;
-
-   OCP_PrepareTrade();
-
-   ulong pendingTicket = 0;
-   double pendingPrice = 0.0;
-   if(OCP_FindPending(ORDER_TYPE_SELL_STOP, pendingTicket, pendingPrice))
-   {
-      if(price < pendingPrice - (OCP_Point() * 0.5))
-      {
-         if(!OCP_ModifyPending(pendingTicket, price, sl))
-            OCP_Log("SellStop modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
-         else
-            OCP_Log("SELL pending moved to low " + DoubleToString(price, OCP_Digits()));
-      }
-      return true;
-   }
-
-   int legs = 1;
-   if(openCount == 0)
-   {
-      legs = room;
-      if(legs > 3)
-         legs = 3;
-      if(legs > allowed)
-         legs = allowed;
-   }
-
-   double baseLot = OCP_CalcLot(ORDER_TYPE_SELL, price);
-   if(baseLot <= 0.0)
-      return false;
-   if(g_cycle_lot <= 0.0)
-      g_cycle_lot = baseLot;
-
-   double lot = OCP_NormVolume(baseLot * (double)legs);
-   if(!g_trade.SellStop(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, "OCP-SELL"))
-   {
-      OCP_Log("SellStop place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
-              " " + g_trade.ResultRetcodeDescription());
-      return false;
-   }
-
-   OCP_Log("SELL pending @ " + DoubleToString(price, OCP_Digits()) +
-           " lot=" + DoubleToString(lot, 2) +
-           " legs=" + IntegerToString(legs) +
-           " prevHigh=" + DoubleToString(prevHigh, OCP_Digits()));
-   return true;
+   int pendCount = OCP_CountAllPendings();
+   return ((openCount + pendCount) < allowed);
 }
 
-bool OCP_PlaceOrMoveBuyStop(const double latestHigh, const double prevLow)
+//======================================================================
+// MAIN BUY (GREEN): place @ high, trail DOWN only, floor=open
+//======================================================================
+bool OCP_ManageBuyMain(const double candleOpen, const double latestHigh)
 {
-   if(!InpAllowBuy)
-      return false;
-   if(!OCP_TradeAllowed())
+   if(!InpAllowBuy || !OCP_TradeAllowed())
       return false;
 
    double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
    double gap = OCP_PendingGap();
+   double minBuy = OCP_NormPrice(ask + MathMax(gap, OCP_StopsDistance() + OCP_Point()));
+   double floorPrice = OCP_NormPrice(candleOpen);
 
-   double price = OCP_NormPrice(latestHigh);
-   double minValidBuy = OCP_NormPrice(ask + MathMax(gap, OCP_StopsDistance() + OCP_Point()));
-   if(price < minValidBuy)
-      price = minValidBuy;
+   // desired initial / trail target: never below open, valid buy-stop above ask
+   double desired = OCP_NormPrice(latestHigh);
+   if(desired < minBuy)
+      desired = minBuy;
+   if(desired < floorPrice)
+      desired = floorPrice;
+
+   // if open is at/above market, buy-stop @ open may be invalid; keep above ask
+   if(desired < minBuy)
+      desired = minBuy;
 
    double emergency = MathMax(OCP_EmergencyDistance(), OCP_StopsDistance() + 2.0 * OCP_Point());
-   double sl = OCP_NormPrice(price - emergency);
-   if(prevLow > 0.0)
-      sl = OCP_NormPrice(MathMin(sl, prevLow - gap));
-
-   int allowed = OCP_AllowedEntries();
-   int openCount = OCP_CountPositions();
-   int room = allowed - openCount;
-   if(room <= 0)
-      return false;
+   double sl = OCP_NormPrice(desired - emergency);
+   if(sl >= desired)
+      sl = OCP_NormPrice(desired - MathMax(gap, 2.0 * OCP_Point()));
 
    OCP_PrepareTrade();
 
-   ulong pendingTicket = 0;
-   double pendingPrice = 0.0;
-   if(OCP_FindPending(ORDER_TYPE_BUY_STOP, pendingTicket, pendingPrice))
+   ulong ticket = 0;
+   double curPrice = 0.0;
+   bool exists = OCP_FindByTag(OCP_TAG_BUY_MAIN, ticket, curPrice);
+
+   if(exists)
    {
-      if(price > pendingPrice + (OCP_Point() * 0.5))
+      // Trail DOWN only. Never raise. Never below open floor (except broker minBuy clamp).
+      double newPrice = curPrice;
+      double trailTarget = OCP_NormPrice(MathMax(floorPrice, minBuy));
+
+      // As price falls, lower pending toward max(open, ask+gap)
+      if(trailTarget < curPrice - (OCP_Point() * 0.1))
+         newPrice = trailTarget;
+
+      // Never raise above current pending if latestHigh is higher
+      double cappedHigh = OCP_NormPrice(MathMax(floorPrice, MathMin(latestHigh, curPrice)));
+      if(cappedHigh >= minBuy && cappedHigh < newPrice - (OCP_Point() * 0.1))
+         newPrice = cappedHigh;
+
+      if(newPrice < floorPrice)
+         newPrice = floorPrice;
+      if(newPrice < minBuy)
+         newPrice = minBuy;
+
+      newPrice = OCP_NormPrice(newPrice);
+      if(newPrice < curPrice - (OCP_Point() * 0.1))
       {
-         if(!OCP_ModifyPending(pendingTicket, price, sl))
-            OCP_Log("BuyStop modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
+         sl = OCP_NormPrice(newPrice - emergency);
+         if(!OCP_ModifyPending(ticket, newPrice, sl))
+            OCP_Log("BUY-MAIN modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
          else
-            OCP_Log("BUY pending moved to high " + DoubleToString(price, OCP_Digits()));
+            OCP_Log("BUY-MAIN trail down -> " + DoubleToString(newPrice, OCP_Digits()));
       }
       return true;
    }
 
-   int legs = 1;
-   if(openCount == 0)
-   {
-      legs = room;
-      if(legs > 3)
-         legs = 3;
-      if(legs > allowed)
-         legs = allowed;
-   }
+   if(!OCP_RoomForNewLegs())
+      return false;
+
+   // Initial place at latest high (clamped valid)
+   double price = desired;
+   if(price < floorPrice)
+      price = floorPrice;
+   if(price < minBuy)
+      price = minBuy;
+   price = OCP_NormPrice(price);
+   sl = OCP_NormPrice(price - emergency);
 
    double baseLot = OCP_CalcLot(ORDER_TYPE_BUY, price);
    if(baseLot <= 0.0)
@@ -605,23 +576,246 @@ bool OCP_PlaceOrMoveBuyStop(const double latestHigh, const double prevLow)
    if(g_cycle_lot <= 0.0)
       g_cycle_lot = baseLot;
 
-   double lot = OCP_NormVolume(baseLot * (double)legs);
-   if(!g_trade.BuyStop(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, "OCP-BUY"))
+   int room = OCP_AllowedEntries() - OCP_CountPositions() - OCP_CountAllPendings();
+   int legs = 1;
+   if(OCP_CountPositions() == 0 && OCP_CountAllPendings() == 0)
    {
-      OCP_Log("BuyStop place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
+      legs = room;
+      if(legs > 3) legs = 3;
+      if(legs < 1) legs = 1;
+   }
+   double lot = OCP_NormVolume(baseLot * (double)legs);
+
+   if(!g_trade.BuyStop(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, OCP_TAG_BUY_MAIN))
+   {
+      OCP_Log("BUY-MAIN place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
               " " + g_trade.ResultRetcodeDescription());
       return false;
    }
 
-   OCP_Log("BUY pending @ " + DoubleToString(price, OCP_Digits()) +
+   OCP_Log("BUY-MAIN placed @ " + DoubleToString(price, OCP_Digits()) +
            " lot=" + DoubleToString(lot, 2) +
-           " legs=" + IntegerToString(legs) +
-           " prevLow=" + DoubleToString(prevLow, OCP_Digits()));
+           " floorOpen=" + DoubleToString(floorPrice, OCP_Digits()));
    return true;
 }
 
 //======================================================================
-// TRAIL / SL
+// MAIN SELL (RED): place @ low, trail UP only, ceiling=open
+//======================================================================
+bool OCP_ManageSellMain(const double candleOpen, const double latestLow)
+{
+   if(!InpAllowSell || !OCP_TradeAllowed())
+      return false;
+
+   double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
+   double gap = OCP_PendingGap();
+   double maxSell = OCP_NormPrice(bid - MathMax(gap, OCP_StopsDistance() + OCP_Point()));
+   double ceiling = OCP_NormPrice(candleOpen);
+
+   double desired = OCP_NormPrice(latestLow);
+   if(desired > maxSell)
+      desired = maxSell;
+   if(desired > ceiling)
+      desired = ceiling;
+
+   if(desired > maxSell)
+      desired = maxSell;
+
+   double emergency = MathMax(OCP_EmergencyDistance(), OCP_StopsDistance() + 2.0 * OCP_Point());
+   double sl = OCP_NormPrice(desired + emergency);
+
+   OCP_PrepareTrade();
+
+   ulong ticket = 0;
+   double curPrice = 0.0;
+   bool exists = OCP_FindByTag(OCP_TAG_SELL_MAIN, ticket, curPrice);
+
+   if(exists)
+   {
+      double newPrice = curPrice;
+      double trailTarget = OCP_NormPrice(MathMin(ceiling, maxSell));
+
+      // As price rises, raise pending toward min(open, bid-gap)
+      if(trailTarget > curPrice + (OCP_Point() * 0.1))
+         newPrice = trailTarget;
+
+      double cappedLow = OCP_NormPrice(MathMin(ceiling, MathMax(latestLow, curPrice)));
+      if(cappedLow <= maxSell && cappedLow > newPrice + (OCP_Point() * 0.1))
+         newPrice = cappedLow;
+
+      if(newPrice > ceiling)
+         newPrice = ceiling;
+      if(newPrice > maxSell)
+         newPrice = maxSell;
+
+      newPrice = OCP_NormPrice(newPrice);
+      if(newPrice > curPrice + (OCP_Point() * 0.1))
+      {
+         sl = OCP_NormPrice(newPrice + emergency);
+         if(!OCP_ModifyPending(ticket, newPrice, sl))
+            OCP_Log("SELL-MAIN modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
+         else
+            OCP_Log("SELL-MAIN trail up -> " + DoubleToString(newPrice, OCP_Digits()));
+      }
+      return true;
+   }
+
+   if(!OCP_RoomForNewLegs())
+      return false;
+
+   double price = desired;
+   if(price > ceiling)
+      price = ceiling;
+   if(price > maxSell)
+      price = maxSell;
+   price = OCP_NormPrice(price);
+   sl = OCP_NormPrice(price + emergency);
+
+   double baseLot = OCP_CalcLot(ORDER_TYPE_SELL, price);
+   if(baseLot <= 0.0)
+      return false;
+   if(g_cycle_lot <= 0.0)
+      g_cycle_lot = baseLot;
+
+   int room = OCP_AllowedEntries() - OCP_CountPositions() - OCP_CountAllPendings();
+   int legs = 1;
+   if(OCP_CountPositions() == 0 && OCP_CountAllPendings() == 0)
+   {
+      legs = room;
+      if(legs > 3) legs = 3;
+      if(legs < 1) legs = 1;
+   }
+   double lot = OCP_NormVolume(baseLot * (double)legs);
+
+   if(!g_trade.SellStop(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, OCP_TAG_SELL_MAIN))
+   {
+      OCP_Log("SELL-MAIN place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
+              " " + g_trade.ResultRetcodeDescription());
+      return false;
+   }
+
+   OCP_Log("SELL-MAIN placed @ " + DoubleToString(price, OCP_Digits()) +
+           " lot=" + DoubleToString(lot, 2) +
+           " ceilingOpen=" + DoubleToString(ceiling, OCP_Digits()));
+   return true;
+}
+
+//======================================================================
+// OPPOSITE @ OPEN (buffer rule)
+// GREEN + buffer: SELL LIMIT @ open
+// RED   + buffer: BUY  LIMIT @ open
+//======================================================================
+bool OCP_ManageSellAtOpen(const double candleOpen)
+{
+   if(!InpAllowSell || !OCP_TradeAllowed())
+      return false;
+
+   double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
+   double gap = OCP_PendingGap();
+   double price = OCP_NormPrice(candleOpen);
+
+   // Sell Limit must be above bid
+   double minSellLimit = OCP_NormPrice(bid + MathMax(gap, OCP_StopsDistance() + OCP_Point()));
+   if(price < minSellLimit)
+   {
+      // open not usable as sell-limit right now
+      OCP_DeleteByTag(OCP_TAG_SELL_OPEN);
+      return false;
+   }
+
+   double emergency = MathMax(OCP_EmergencyDistance(), OCP_StopsDistance() + 2.0 * OCP_Point());
+   double sl = OCP_NormPrice(price + emergency);
+
+   OCP_PrepareTrade();
+
+   ulong ticket = 0;
+   double curPrice = 0.0;
+   if(OCP_FindByTag(OCP_TAG_SELL_OPEN, ticket, curPrice))
+   {
+      if(MathAbs(curPrice - price) > OCP_Point() * 0.1)
+      {
+         if(!OCP_ModifyPending(ticket, price, sl))
+            OCP_Log("SELL-OPEN modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
+      }
+      return true;
+   }
+
+   if(!OCP_RoomForNewLegs())
+      return false;
+
+   double lot = OCP_CalcLot(ORDER_TYPE_SELL, price);
+   if(lot <= 0.0)
+      return false;
+   if(g_cycle_lot <= 0.0)
+      g_cycle_lot = lot;
+
+   if(!g_trade.SellLimit(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, OCP_TAG_SELL_OPEN))
+   {
+      OCP_Log("SELL-OPEN place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
+              " " + g_trade.ResultRetcodeDescription());
+      return false;
+   }
+
+   OCP_Log("SELL-OPEN placed @ open " + DoubleToString(price, OCP_Digits()));
+   return true;
+}
+
+bool OCP_ManageBuyAtOpen(const double candleOpen)
+{
+   if(!InpAllowBuy || !OCP_TradeAllowed())
+      return false;
+
+   double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
+   double gap = OCP_PendingGap();
+   double price = OCP_NormPrice(candleOpen);
+
+   // Buy Limit must be below ask
+   double maxBuyLimit = OCP_NormPrice(ask - MathMax(gap, OCP_StopsDistance() + OCP_Point()));
+   if(price > maxBuyLimit)
+   {
+      OCP_DeleteByTag(OCP_TAG_BUY_OPEN);
+      return false;
+   }
+
+   double emergency = MathMax(OCP_EmergencyDistance(), OCP_StopsDistance() + 2.0 * OCP_Point());
+   double sl = OCP_NormPrice(price - emergency);
+
+   OCP_PrepareTrade();
+
+   ulong ticket = 0;
+   double curPrice = 0.0;
+   if(OCP_FindByTag(OCP_TAG_BUY_OPEN, ticket, curPrice))
+   {
+      if(MathAbs(curPrice - price) > OCP_Point() * 0.1)
+      {
+         if(!OCP_ModifyPending(ticket, price, sl))
+            OCP_Log("BUY-OPEN modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
+      }
+      return true;
+   }
+
+   if(!OCP_RoomForNewLegs())
+      return false;
+
+   double lot = OCP_CalcLot(ORDER_TYPE_BUY, price);
+   if(lot <= 0.0)
+      return false;
+   if(g_cycle_lot <= 0.0)
+      g_cycle_lot = lot;
+
+   if(!g_trade.BuyLimit(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, OCP_TAG_BUY_OPEN))
+   {
+      OCP_Log("BUY-OPEN place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
+              " " + g_trade.ResultRetcodeDescription());
+      return false;
+   }
+
+   OCP_Log("BUY-OPEN placed @ open " + DoubleToString(price, OCP_Digits()));
+   return true;
+}
+
+//======================================================================
+// POSITION TRAIL / EMERGENCY SL
 //======================================================================
 void OCP_ManageOpenPositions()
 {
@@ -704,12 +898,18 @@ void OCP_ManageOpenPositions()
 //======================================================================
 // UI / FLOW
 //======================================================================
-void OCP_OnNewBar()
+void OCP_OnNewBar(const datetime barTime)
 {
-   g_profit_lock = false;
+   g_bar_time = barTime;
    g_cycle_lot = 0.0;
-   OCP_DeletePendings(true, true);
-   OCP_Log("New candle -> reset profit-lock and pendings");
+
+   int delayMin = InpStructureDelayMinutes;
+   if(delayMin < 0)
+      delayMin = 0;
+   g_delay_until = barTime + (datetime)(delayMin * 60);
+
+   OCP_DeleteAllPendings();
+   OCP_Log("New candle -> delay until " + TimeToString(g_delay_until, TIME_DATE|TIME_MINUTES));
 }
 
 void OCP_UpdateComment(const int candleColor,
@@ -717,13 +917,14 @@ void OCP_UpdateComment(const int candleColor,
                        const double high0,
                        const double low0,
                        const double prevHigh,
-                       const double prevLow)
+                       const double prevLow,
+                       const bool delayActive)
 {
    string colorName = "FLAT";
    if(candleColor == OCP_RED)
-      colorName = "RED / SELL";
+      colorName = "RED / SELL-MAIN";
    if(candleColor == OCP_GREEN)
-      colorName = "GREEN / BUY";
+      colorName = "GREEN / BUY-MAIN";
 
    string family = " (US30)";
    if(g_is_gold)
@@ -733,20 +934,25 @@ void OCP_UpdateComment(const int candleColor,
    if(g_cycle_lot > 0.0)
       lotText = DoubleToString(g_cycle_lot, 2);
 
-   string lockText = "NO";
-   if(g_profit_lock)
-      lockText = "YES (wait next candle)";
+   string delayText = "READY";
+   if(delayActive)
+      delayText = "WAIT " + TimeToString(g_delay_until, TIME_MINUTES|TIME_SECONDS);
 
-   string line1 = "OpenColorPending v1.20";
+   string bufText = "NO";
+   if(OCP_BufferOk(open0))
+      bufText = "YES";
+
+   string line1 = "OpenColorPending v2.00";
    string line2 = "Symbol: " + g_symbol + family;
    string line3 = "Open: " + DoubleToString(open0, OCP_Digits()) + " | Color: " + colorName;
    string line4 = "Current H/L: " + DoubleToString(high0, OCP_Digits()) + " / " + DoubleToString(low0, OCP_Digits());
    string line5 = "Previous H/L: " + DoubleToString(prevHigh, OCP_Digits()) + " / " + DoubleToString(prevLow, OCP_Digits());
-   string line6 = "Positions: " + IntegerToString(OCP_CountPositions()) +
-                  " / Allowed: " + IntegerToString(OCP_AllowedEntries()) +
-                  " | Pendings: " + IntegerToString(OCP_CountAllPendings());
-   string line7 = "CycleLot: " + lotText + " | Trail: " + DoubleToString(OCP_TrailDistance(), OCP_Digits());
-   string line8 = "ProfitLock: " + lockText;
+   string line6 = "Delay: " + delayText + " | BufferOK: " + bufText +
+                  " (" + DoubleToString(OCP_BufferDistance(), OCP_Digits()) + ")";
+   string line7 = "Pos: " + IntegerToString(OCP_CountPositions()) +
+                  " / Allow: " + IntegerToString(OCP_AllowedEntries()) +
+                  " | Pend: " + IntegerToString(OCP_CountAllPendings());
+   string line8 = "CycleLot: " + lotText + " | Trail: " + DoubleToString(OCP_TrailDistance(), OCP_Digits());
 
    Comment(line1, "\n", line2, "\n", line3, "\n", line4, "\n", line5, "\n", line6, "\n", line7, "\n", line8);
 }
@@ -767,48 +973,54 @@ void OCP_OnTickLogic()
    if(!OCP_CopyBar(1, time1, open1, high1, low1))
       return;
 
-   double prevHigh = high1;
-   double prevLow = low1;
-
-   // use open1/time1 so no unused-variable warnings
-   if(open1 <= 0.0)
-      return;
-   if(time1 <= 0)
+   if(open1 <= 0.0 || time1 <= 0)
       return;
 
    if(time0 != g_bar_time)
-   {
-      g_bar_time = time0;
-      OCP_OnNewBar();
-   }
+      OCP_OnNewBar(time0);
 
    OCP_ManageOpenPositions();
 
-   int candleColor = OCP_DetectColor(open0);
-   OCP_UpdateComment(candleColor, open0, high0, low0, prevHigh, prevLow);
+   int candleColor = OCP_DetectCandleColor(open0);
+   bool delayActive = (TimeCurrent() < g_delay_until);
+   OCP_UpdateComment(candleColor, open0, high0, low0, high1, low1, delayActive);
 
-   if(g_profit_lock)
-   {
-      OCP_DeletePendings(true, true);
+   if(delayActive)
       return;
-   }
 
-   if(candleColor == OCP_RED)
+   if(candleColor == OCP_GREEN)
    {
-      OCP_DeletePendings(true, false);
-      OCP_PlaceOrMoveSellStop(low0, prevHigh);
+      // Main BUY only; cancel sell-main
+      OCP_DeleteByTag(OCP_TAG_SELL_MAIN);
+      OCP_ManageBuyMain(open0, high0);
+
+      if(OCP_BufferOk(open0))
+         OCP_ManageSellAtOpen(open0);
+      else
+         OCP_DeleteByTag(OCP_TAG_SELL_OPEN);
+
+      // no buy@open on green
+      OCP_DeleteByTag(OCP_TAG_BUY_OPEN);
+   }
+   else if(candleColor == OCP_RED)
+   {
+      OCP_DeleteByTag(OCP_TAG_BUY_MAIN);
+      OCP_ManageSellMain(open0, low0);
+
+      if(OCP_BufferOk(open0))
+         OCP_ManageBuyAtOpen(open0);
+      else
+         OCP_DeleteByTag(OCP_TAG_BUY_OPEN);
+
+      OCP_DeleteByTag(OCP_TAG_SELL_OPEN);
    }
    else
    {
-      if(candleColor == OCP_GREEN)
-      {
-         OCP_DeletePendings(false, true);
-         OCP_PlaceOrMoveBuyStop(high0, prevLow);
-      }
-      else
-      {
-         OCP_DeletePendings(true, true);
-      }
+      // FLAT: cancel mains; keep open-side only if buffer still valid
+      OCP_DeleteByTag(OCP_TAG_BUY_MAIN);
+      OCP_DeleteByTag(OCP_TAG_SELL_MAIN);
+      OCP_DeleteByTag(OCP_TAG_BUY_OPEN);
+      OCP_DeleteByTag(OCP_TAG_SELL_OPEN);
    }
 }
 
@@ -831,9 +1043,10 @@ void OCP_HandleClosedDeal(const ulong dealTicket)
 
    if(pnl > 0.0)
    {
-      g_profit_lock = true;
-      OCP_DeletePendings(true, true);
-      OCP_Log("Profit lock ON (pnl=" + DoubleToString(pnl, 2) + "). Wait next candle.");
+      // Profit -> clear pendings and allow fresh cycle under same candle rules
+      OCP_DeleteAllPendings();
+      g_cycle_lot = 0.0;
+      OCP_Log("Profit close pnl=" + DoubleToString(pnl, 2) + " -> re-arm pending cycle");
    }
 }
 
@@ -846,7 +1059,7 @@ int OnInit()
    g_is_gold = false;
    g_is_us30 = false;
    g_bar_time = 0;
-   g_profit_lock = false;
+   g_delay_until = 0;
    g_cycle_lot = 0.0;
    g_last_log = "";
    g_symbol = "";
@@ -856,8 +1069,8 @@ int OnInit()
 
    OCP_PrepareTrade();
 
-   OCP_Log("Init OK v1.20 | trail=" + DoubleToString(OCP_TrailDistance(), OCP_Digits()) +
-           " | maxEntries=" + IntegerToString(OCP_MAX_ENTRIES) +
+   OCP_Log("Init OK v2.00 | delay=" + IntegerToString(InpStructureDelayMinutes) +
+           "m | buffer=" + DoubleToString(OCP_BufferDistance(), OCP_Digits()) +
            " | symbol=" + g_symbol);
    return INIT_SUCCEEDED;
 }
@@ -884,7 +1097,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if(trans.deal == 0)
       return;
 
-   // touch request/result (no unused warnings)
+   // touch request/result (avoid unused-parameter warnings)
    long reqMagic = request.magic;
    uint retcode = result.retcode;
    if(reqMagic < -1)

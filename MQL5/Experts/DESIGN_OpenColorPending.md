@@ -1,6 +1,6 @@
 # EA_OpenColorPending — Full Design v2.00
 
-**Status:** Confirmed design (ready for implementation)  
+**Status:** Confirmed design — implemented in `EA_OpenColorPending.mq5` v2.00  
 **Symbol scope:** XAUUSD + US30  
 **Style:** Single-file MQL5 Expert Advisor  
 **Kept from previous EA:** Dynamic lot by equity, dynamic entries (max 15), no martingale, emergency SL, position trail SL after fill
