@@ -346,7 +346,7 @@ Outside session: manage open positions only; cancel/block new pendings.
 
 ---
 
-## 16. Acceptance checklist
+## 18. Acceptance checklist
 
 1. First 5 minutes of candle → no new pendings
 2. GREEN → main BUY only at high; trails down only; stops at open
@@ -354,18 +354,19 @@ Outside session: manage open positions only; cancel/block new pendings.
 4. GREEN + buffer≥3 → SELL pending exactly at open (not low)
 5. RED + buffer≥3 → BUY pending exactly at open (not high)
 6. Buffer <3 → no opposite@open
-7. Fill → emergency SL + trail SL works
-8. Dynamic lot/entries still active
-9. Compiles with 0 errors / 0 warnings
+7. Fill → emergency SL + adjustable RR secure/trail works
+8. Session filter blocks new pendings outside window
+9. Dynamic lot/entries still active
+10. Compiles with 0 errors / 0 warnings
 
 ---
 
-## 17. File plan
+## 19. File plan
 
 | File | Role |
 |---|---|
 | `MQL5/Experts/DESIGN_OpenColorPending.md` | This design (source of truth) |
-| `MQL5/Experts/EA_OpenColorPending.mq5` | Implementation (to update next) |
+| `MQL5/Experts/EA_OpenColorPending.mq5` | Implementation v2.10 |
 | `MQL5/Experts/README_OpenColorPending.md` | Short install notes |
 
 ---
