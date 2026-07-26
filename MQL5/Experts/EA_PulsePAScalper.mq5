@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.01"
-#property description "M1-tuned pure price-action scalper (no indicators). Attach on M1."
+#property version   "1.02"
+#property description "M1 PA scalper: scaled risk (high on small equity), no daily loss pause"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -42,13 +42,20 @@ input int    InpMaxHoldSeconds      = 480;     // Max hold (8 min) — keep M1 t
 input group "=== Filters / frequency ==="
 input double InpMaxSpreadPoints     = 40;      // Max spread (points), 0 = off
 input int    InpCooldownSeconds     = 20;      // Short cooldown so M1 can re-fire
-input int    InpMaxTradesPerDay     = 50;      // Hard cap for active M1 day
+input int    InpMaxTradesPerDay     = 0;       // Hard cap (0 = unlimited — keep trading)
 input long   InpMagic               = 26072601;// Magic number
 
-input group "=== Risk ==="
-input double InpRiskPercent         = 0.4;     // Risk % per trade (lower because more entries)
+input group "=== Risk (scaled by equity) ==="
+input bool   InpUseScaledRisk       = true;    // Auto-lower risk % as equity grows
+input double InpRiskPct_Under50     = 25.0;    // Risk % when equity < $50 (e.g. $30 start)
+input double InpRiskPct_50to100     = 15.0;    // Risk % when $50–$100
+input double InpRiskPct_100to250    = 8.0;     // Risk % when $100–$250
+input double InpRiskPct_250to500    = 4.0;     // Risk % when $250–$500
+input double InpRiskPct_500to1000   = 2.0;     // Risk % when $500–$1000
+input double InpRiskPct_Over1000    = 1.0;     // Risk % when equity >= $1000
+input double InpRiskPercent         = 25.0;    // Flat risk % if scaled risk OFF
 input double InpFixedLot            = 0.0;     // Fixed lot (0 = use risk %)
-input double InpMaxDailyLossPct     = 3.0;     // Pause day after this equity drawdown %
+input double InpMaxDailyLossPct     = 0.0;     // 0 = OFF (no daily pause — keep trading)
 input int    InpSlippagePoints      = 40;      // Max slippage (points)
 
 //======================================================================
@@ -211,16 +218,36 @@ bool PAS_HasOurPosition(ulong &ticket, long &type, double &openPrice, datetime &
    return false;
 }
 
+double PAS_ActiveRiskPercent()
+{
+   if(!InpUseScaledRisk)
+      return MathMax(0.0, InpRiskPercent);
+
+   const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity < 50.0)
+      return MathMax(0.0, InpRiskPct_Under50);
+   if(equity < 100.0)
+      return MathMax(0.0, InpRiskPct_50to100);
+   if(equity < 250.0)
+      return MathMax(0.0, InpRiskPct_100to250);
+   if(equity < 500.0)
+      return MathMax(0.0, InpRiskPct_250to500);
+   if(equity < 1000.0)
+      return MathMax(0.0, InpRiskPct_500to1000);
+   return MathMax(0.0, InpRiskPct_Over1000);
+}
+
 double PAS_CalcLot(const double slDistancePrice)
 {
    if(InpFixedLot > 0.0)
       return PAS_NormVol(InpFixedLot);
 
-   if(slDistancePrice <= 0.0 || InpRiskPercent <= 0.0)
+   const double riskPct = PAS_ActiveRiskPercent();
+   if(slDistancePrice <= 0.0 || riskPct <= 0.0)
       return PAS_NormVol(SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN));
 
    const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   const double riskMoney = equity * (InpRiskPercent / 100.0);
+   const double riskMoney = equity * (riskPct / 100.0);
    const double tickSize = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
    const double tickValue = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
    if(tickSize <= 0.0 || tickValue <= 0.0)
@@ -457,8 +484,9 @@ bool PAS_OpenTrade(const ENUM_PAS_SIGNAL sig, const double slPrice, const double
       g_tradesToday++;
       g_beMoved = false;
       g_managedTicket = g_trade.ResultOrder();
-      PrintFormat("PulsePA: opened %s sl=%.5f tp=%.5f tradesToday=%d",
-                  (sig == PAS_BUY ? "BUY" : "SELL"), slPrice, tpPrice, g_tradesToday);
+      PrintFormat("PulsePA: opened %s sl=%.5f tp=%.5f risk=%.2f%% equity=%.2f tradesToday=%d",
+                  (sig == PAS_BUY ? "BUY" : "SELL"), slPrice, tpPrice,
+                  PAS_ActiveRiskPercent(), AccountInfoDouble(ACCOUNT_EQUITY), g_tradesToday);
    }
    else
    {
@@ -491,9 +519,11 @@ int OnInit()
       PrintFormat("PulsePA WARNING: defaults are tuned for M1, chart is %s. Attach on M1 for intended behavior.",
                   EnumToString(g_tf));
 
-   PrintFormat("PulsePA v1.01 M1 | %s %s | range=%d body>=%.0f%% minPts=%.0f RR=%.2f risk=%.2f%% session=%02d:%02d-%02d:%02d",
+   PrintFormat("PulsePA v1.02 M1 | %s %s | range=%d body>=%.0f%% minPts=%.0f RR=%.2f activeRisk=%.2f%% scaled=%s dailyLossLock=%s session=%02d:%02d-%02d:%02d",
                g_symbol, EnumToString(g_tf), InpRangeBars, InpMinBodyRatio * 100.0,
-               InpMinCandlePoints, InpRiskReward, InpRiskPercent,
+               InpMinCandlePoints, InpRiskReward, PAS_ActiveRiskPercent(),
+               (InpUseScaledRisk ? "ON" : "OFF"),
+               (InpMaxDailyLossPct > 0.0 ? "ON" : "OFF"),
                InpSessionStartHour, InpSessionStartMin, InpSessionEndHour, InpSessionEndMin);
    return INIT_SUCCEEDED;
 }
