@@ -18,8 +18,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.00"
-#property description "BalochPulse: adaptive tick+candle, risk manager, same-price burst, smart exit, news/FOMC"
+#property version   "1.10"
+#property description "BalochPulse v1.10: looser adaptive entries, FOMC+blackout news, more frequent pulses"
 
 #include <Trade/Trade.mqh>
 
@@ -38,52 +38,55 @@ input bool   InpAllowSell             = true;
 
 input group "=== Same-Price Burst ==="
 input double InpMaxSamePriceSlippage  = 0.0;      // Max distance from 1st fill (0=auto)
-input int    InpBurstGapMs            = 250;      // Min ms between burst adds
-input int    InpMaxBurstPerPulse      = 3;        // Max adds in one impulse pulse
+input int    InpBurstGapMs            = 180;      // Min ms between burst adds
+input int    InpMaxBurstPerPulse      = 4;        // Max adds in one impulse pulse
 
 input group "=== Adaptive Tick Window ==="
 input int    InpWindowMinSec          = 2;        // Min adaptive window (sec)
-input int    InpWindowMaxSec          = 45;       // Max adaptive window (sec)
+input int    InpWindowMaxSec          = 30;       // Max adaptive window (sec)
 input int    InpTickBufferSize        = 800;      // Tick ring buffer size
-input double InpImbalanceQuiet        = 0.66;     // Needed imbalance when quiet
-input double InpImbalanceBurst        = 0.56;     // Needed imbalance when bursty
+input double InpImbalanceQuiet        = 0.55;     // Needed imbalance when quiet
+input double InpImbalanceBurst        = 0.52;     // Needed imbalance when bursty
 input double InpMinNetMovePrice       = 0.0;      // Min net move in window (0=auto)
 
 input group "=== Pullback / Impulse ==="
-input int    InpMinImpulseTicks       = 8;        // Min ticks inside adaptive window
-input double InpPullbackFrac          = 0.28;     // Pullback depth vs impulse move
-input double InpPullbackMaxFrac       = 0.85;     // Cancel if pullback too deep
-input int    InpSetupExpireSec        = 25;       // Cancel setup if stale
+input int    InpMinImpulseTicks       = 5;        // Min ticks inside adaptive window
+input bool   InpRequirePullback       = false;    // false = can enter on strong impulse
+input double InpPullbackFrac          = 0.12;     // Pullback depth vs impulse move
+input double InpPullbackMaxFrac       = 0.95;     // Cancel if pullback too deep
+input int    InpSetupExpireSec        = 60;       // Cancel setup if stale
+input bool   InpUseCandleConfirm      = false;    // false = tick pressure enough to enter
 
 input group "=== Risk Manager ==="
 input bool   InpUseDynamicLot         = true;     // Equity-based lot
 input bool   InpUseDynamicEntries     = true;     // Equity/signal-based entries
 input bool   InpSameLotPerCycle       = true;     // No martingale (same lot/cycle)
-input double InpDdDefensivePct        = 1.2;      // Floating DD% -> DEFENSIVE
-input double InpDdLockdownPct         = 2.5;      // Floating DD% -> LOCKDOWN
-input int    InpLossStreakDefensive   = 2;        // Losses in a row -> DEFENSIVE
-input int    InpLossStreakLockdown    = 4;        // Losses in a row -> LOCKDOWN
+input double InpDdDefensivePct        = 2.0;      // Floating DD% -> DEFENSIVE
+input double InpDdLockdownPct         = 4.0;      // Floating DD% -> LOCKDOWN
+input int    InpLossStreakDefensive   = 3;        // Losses in a row -> DEFENSIVE
+input int    InpLossStreakLockdown    = 6;        // Losses in a row -> LOCKDOWN
 
 input group "=== Smart Exit ==="
 input double InpMinProfitToSecure     = 0.0;      // Min $ profit before threat-close (0=auto)
-input double InpThreatImbalance       = 0.58;     // Opposite imbalance to threaten
-input double InpGivebackFrac          = 0.45;     // Close if give back this fraction of peak
+input double InpThreatImbalance       = 0.62;     // Opposite imbalance to threaten
+input double InpGivebackFrac          = 0.55;     // Close if give back this fraction of peak
 input double InpEmergencyStopDist     = 0.0;      // Emergency SL distance (0=auto)
-input int    InpCooldownSec           = 4;        // Seconds after full close
+input int    InpCooldownSec           = 2;        // Seconds after full close
 
 input group "=== Session (NY-London) ==="
 input bool   InpUseSessionFilter      = true;     // Trade new entries in session only
 input int    InpSessionTZOffsetHrs    = 8;        // Local TZ vs GMT (PH=8)
 input int    InpSessionStartHour      = 20;       // Session start hour (local)
 input int    InpSessionStartMinute    = 0;
-input int    InpSessionEndHour        = 1;        // Session end hour (local)
+input int    InpSessionEndHour        = 5;        // Session end hour (local) 8PM-5AM PH
 input int    InpSessionEndMinute      = 0;
 
 input group "=== News / FOMC Guard ==="
 input bool   InpUseHardBlackouts      = true;     // 8:30-8:40 & 9:30-9:40 PM local
 input bool   InpUseCalendarFilter     = true;     // MT5 economic calendar
-input int    InpNewsBufferMin         = 8;        // Minutes around high-impact USD
-input int    InpFomcBlockMin          = 45;       // Minutes around FOMC events
+input bool   InpBlockHighImpactUSD    = false;    // false = FOMC only (more entries)
+input int    InpNewsBufferMin         = 5;        // Minutes around high-impact USD
+input int    InpFomcBlockMin          = 30;       // Minutes around FOMC events
 input bool   InpCloseOnNewsThreat     = true;     // Allow exit brain during news block
 
 input group "=== Runtime ==="
@@ -266,14 +269,16 @@ double BP_AutoPriceUnit()
 double BP_SamePriceBand()
 {
    if(InpMaxSamePriceSlippage > 0.0) return InpMaxSamePriceSlippage;
-   if(g_is_us30) return MathMax(1.5, 120.0 * BP_Point());
-   return MathMax(0.15, 120.0 * BP_Point());
+   // Wider band so burst adds are not rejected too often
+   if(g_is_us30) return MathMax(3.0, 250.0 * BP_Point());
+   return MathMax(0.30, 250.0 * BP_Point());
 }
 
 double BP_MinNetMove()
 {
    if(InpMinNetMovePrice > 0.0) return InpMinNetMovePrice;
-   return BP_AutoPriceUnit() * 0.35;
+   // Looser: small directional move is enough
+   return BP_AutoPriceUnit() * 0.15;
 }
 
 double BP_EmergencyStop()
@@ -474,7 +479,8 @@ bool BP_CalendarBlocked(string &reason)
       const bool isFomc = BP_IsFomcText(ev.name);
       const bool highImpact = (ev.importance == CALENDAR_IMPORTANCE_HIGH);
 
-      if(!isFomc && !highImpact)
+      // Default: FOMC only. Optional high-impact USD block.
+      if(!isFomc && !(InpBlockHighImpactUSD && highImpact))
          continue;
 
       datetime eventTime = values[i].time;
@@ -653,16 +659,24 @@ AdaptiveSignal BP_BuildSignal()
    sig.downBias = (double)down / (double)dirTicks;
    sig.netMove = newestMid - firstMid;
 
-   // Adaptive threshold
+   // Adaptive threshold (lean toward more entries)
    double thr = InpImbalanceQuiet;
-   if(tps >= 5.0) thr = InpImbalanceBurst;
-   else if(tps >= 2.5) thr = 0.5 * (InpImbalanceBurst + InpImbalanceQuiet);
+   if(tps >= 3.0) thr = InpImbalanceBurst;
+   else if(tps >= 1.5) thr = 0.5 * (InpImbalanceBurst + InpImbalanceQuiet);
+   // Tiny accounts / slow ticks: accept slight majority if net move agrees
+   if(tps < 1.0) thr = MathMin(thr, 0.54);
    sig.threshold = thr;
 
    const double minMove = BP_MinNetMove();
-   if(sig.upBias >= thr && sig.netMove >= minMove)
+   // Soft path: majority + any confirming net move
+   if(sig.upBias >= thr && sig.netMove > 0.0 && MathAbs(sig.netMove) >= minMove * 0.5)
       sig.bias = BP_BIAS_BUY;
-   else if(sig.downBias >= thr && sig.netMove <= -minMove)
+   else if(sig.downBias >= thr && sig.netMove < 0.0 && MathAbs(sig.netMove) >= minMove * 0.5)
+      sig.bias = BP_BIAS_SELL;
+   // Strong majority fallback even if move is small
+   else if(sig.upBias >= thr + 0.08 && sig.netMove >= 0.0)
+      sig.bias = BP_BIAS_BUY;
+   else if(sig.downBias >= thr + 0.08 && sig.netMove <= 0.0)
       sig.bias = BP_BIAS_SELL;
 
    sig.valid = true;
@@ -675,6 +689,8 @@ AdaptiveSignal BP_BuildSignal()
 bool BP_CandleAgrees(const ENUM_BP_BIAS bias)
 {
    if(bias == BP_BIAS_NONE) return false;
+   // Looser mode: tick imbalance alone is enough
+   if(!InpUseCandleConfirm) return true;
 
    double o[], c[], h[], l[];
    ArraySetAsSeries(o, true);
@@ -682,10 +698,10 @@ bool BP_CandleAgrees(const ENUM_BP_BIAS bias)
    ArraySetAsSeries(h, true);
    ArraySetAsSeries(l, true);
 
-   if(CopyOpen(g_symbol, PERIOD_CURRENT, 0, 3, o) < 3) return false;
-   if(CopyClose(g_symbol, PERIOD_CURRENT, 0, 3, c) < 3) return false;
-   if(CopyHigh(g_symbol, PERIOD_CURRENT, 0, 3, h) < 3) return false;
-   if(CopyLow(g_symbol, PERIOD_CURRENT, 0, 3, l) < 3) return false;
+   if(CopyOpen(g_symbol, PERIOD_CURRENT, 0, 3, o) < 3) return true;
+   if(CopyClose(g_symbol, PERIOD_CURRENT, 0, 3, c) < 3) return true;
+   if(CopyHigh(g_symbol, PERIOD_CURRENT, 0, 3, h) < 3) return true;
+   if(CopyLow(g_symbol, PERIOD_CURRENT, 0, 3, l) < 3) return true;
 
    const double body0 = c[0] - o[0];
    const double body1 = c[1] - o[1];
@@ -694,16 +710,14 @@ bool BP_CandleAgrees(const ENUM_BP_BIAS bias)
 
    if(bias == BP_BIAS_BUY)
    {
-      // Prefer green pressure / not heavy sell rejection
-      if(body1 < -range1 * 0.65 && closePos1 < 0.25) return false;
-      if(body0 < -MathAbs(body1) * 1.2 && body0 < 0) return false;
-      return (body1 >= 0.0 || body0 >= 0.0 || closePos1 >= 0.55);
+      // Only veto extreme opposite rejection
+      if(body1 < -range1 * 0.85 && closePos1 < 0.15) return false;
+      return true;
    }
 
    // SELL
-   if(body1 > range1 * 0.65 && closePos1 > 0.75) return false;
-   if(body0 > MathAbs(body1) * 1.2 && body0 > 0) return false;
-   return (body1 <= 0.0 || body0 <= 0.0 || closePos1 <= 0.45);
+   if(body1 > range1 * 0.85 && closePos1 > 0.85) return false;
+   return true;
 }
 
 bool BP_CandleThreat(const ENUM_BP_BIAS openBias)
@@ -1304,10 +1318,14 @@ void BP_ManageOpen()
       string reason;
       if(BP_CanOpenNewEntries(reason))
       {
-         // Require continued bias agreement for adds
-         if(sig.valid && sig.bias == openBias && BP_CandleAgrees(openBias))
+         // Looser adds: same open bias + not opposite-threatened
+         const bool biasOk = (sig.valid && (sig.bias == openBias || sig.bias == BP_BIAS_NONE));
+         const bool notOpposite =
+            !(sig.valid && openBias == BP_BIAS_BUY && sig.downBias >= InpThreatImbalance) &&
+            !(sig.valid && openBias == BP_BIAS_SELL && sig.upBias >= InpThreatImbalance);
+
+         if(biasOk && notOpposite && BP_CandleAgrees(openBias))
          {
-            // For adds, treat as continuation burst with pullback already satisfied
             if(g_state != BP_ENTER_BURST) g_state = BP_ENTER_BURST;
             BP_TryBurstEntry(sig);
          }
@@ -1371,21 +1389,37 @@ void BP_ProcessSetup(const AdaptiveSignal &sig)
       {
          if(mid > g_impulse_extreme) g_impulse_extreme = mid;
          g_impulse_move = MathMax(g_impulse_move, MathAbs(sig.netMove));
-         // Transition to wait pullback once impulse established
-         if(g_impulse_move >= BP_MinNetMove())
+         if(g_impulse_move >= BP_MinNetMove() * 0.5)
          {
-            g_state = BP_WAIT_PULLBACK;
-            g_pullback_extreme = mid;
+            // Direct entry path for frequency (Baloch-style)
+            if(!InpRequirePullback)
+            {
+               g_pullback_seen = true;
+               g_state = BP_ENTER_BURST;
+            }
+            else
+            {
+               g_state = BP_WAIT_PULLBACK;
+               g_pullback_extreme = mid;
+            }
          }
       }
       else if(g_bias == BP_BIAS_SELL)
       {
          if(mid < g_impulse_extreme || g_impulse_extreme <= 0.0) g_impulse_extreme = mid;
          g_impulse_move = MathMax(g_impulse_move, MathAbs(sig.netMove));
-         if(g_impulse_move >= BP_MinNetMove())
+         if(g_impulse_move >= BP_MinNetMove() * 0.5)
          {
-            g_state = BP_WAIT_PULLBACK;
-            g_pullback_extreme = mid;
+            if(!InpRequirePullback)
+            {
+               g_pullback_seen = true;
+               g_state = BP_ENTER_BURST;
+            }
+            else
+            {
+               g_state = BP_WAIT_PULLBACK;
+               g_pullback_extreme = mid;
+            }
          }
       }
       return;
