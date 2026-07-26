@@ -278,8 +278,8 @@ double BP_SamePriceBand()
 double BP_MinNetMove()
 {
    if(InpMinNetMovePrice > 0.0) return InpMinNetMovePrice;
-   // Looser: small directional move is enough
-   return BP_AutoPriceUnit() * 0.15;
+   // Very loose for frequent pulse detection
+   return BP_AutoPriceUnit() * 0.08;
 }
 
 double BP_EmergencyStop()
