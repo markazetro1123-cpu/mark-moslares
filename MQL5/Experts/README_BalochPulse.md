@@ -1,44 +1,37 @@
-# EA_BalochPulse — Architecture v2 (locked behavior)
+# EA_BalochPulse — ARCH v2.50 (rules enforced)
 
-Single file:
+File:
 
 ```
 MQL5/Experts/EA_BalochPulse.mq5
 ```
 
-## Important
-Core behavior is **inside the engines**, not adjustable filter soup.  
-Inputs are only account/broker/session-clock settings.
+Must show on chart comment: **`BalochPulse ARCH v2.50`**
 
-## Always-on engines
-1. **Session Guard** — NY–London only (default PH 8PM–5AM)
-2. **News/FOMC Guard** — hard blackouts 20:30–20:40 & 21:30–21:40 + high-impact USD + FOMC
-3. **Adaptive Tick Engine** — no fixed 30-tick window; window adapts to tick speed
-4. **Candle Memory** — confirms impulse / detects threat
-5. **Risk Manager (CEO)** — decides mode, lot, entries with common sense + memory
-6. **Same-price Burst Entry** — multi-entry at same price band only
-7. **Smart Self-Exit** — closes when profit is threatened (main exit)
-
-## Locked architecture rules
-- No spread filter
-- No martingale (same lot per cycle)
-- Max entries hard cap = **15**
-- `$30–$50` can intelligently open **2–3** entries when clean
-- Impulse → small pullback → burst enter
-- Lot/entries grow with equity + signal quality via Risk Manager
-- XAUUSD and US30 use **same logic**
-- Emergency SL = safety net only
+## Locked rules
+| ID | Rule |
+|---|---|
+| R1 | NY–London session only (new entries) |
+| R2 | Hard blackout 20:30–20:40 & 21:30–21:40 |
+| R3 | High-impact USD + FOMC block |
+| R4 | Adaptive tick imbalance (no fixed 30) |
+| R5 | Candle memory agree |
+| R6 | Impulse → pullback → enter |
+| R7 | Risk Manager decides lot + entries |
+| R8 | $30–$50 can open 2–3 when clean |
+| R9 | Max 15 hard cap |
+| R10 | Same-price burst (one shot / one band) |
+| R11 | No martingale |
+| R12 | Smart self-exit main exit |
+| R13 | No spread filter |
+| R14 | XAUUSD + US30 same logic |
+| R15 | Always-on engines + on-chart rule monitor |
 
 ## Minimal inputs
-- Magic / Risk% / MinLot / MaxLotCap / Slippage / AllowBuy/Sell
-- Session clock (TZ + start/end)
-- Print logs
+Magic / Risk% / lots / slippage / buy-sell / session clock / logs
 
-## State machine
-```
-IDLE → BIAS_DETECT → IMPULSE_CONFIRM → WAIT_PULLBACK → ENTER_BURST → MANAGE → SMART_EXIT → COOLDOWN
-```
-
-## Install
-Copy one file → Compile → attach XAUUSD or US30 → Algo Trading ON.  
-For live: keep session clock correct for your local TZ (PH=8).
+## Verify
+1. Compile v2.50
+2. Attach chart
+3. Look top-left **Comment** panel (`RuleNow: ...`)
+4. Journal logs start with `R1`…`R12` tags
