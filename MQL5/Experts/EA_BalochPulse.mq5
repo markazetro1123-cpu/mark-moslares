@@ -18,8 +18,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.10"
-#property description "BalochPulse v1.10: looser adaptive entries, FOMC+blackout news, more frequent pulses"
+#property version   "1.20"
+#property description "BalochPulse v1.20: tester bar-fallback + recommended loose defaults for real entries"
 
 #include <Trade/Trade.mqh>
 
@@ -28,53 +28,53 @@
 //======================================================================
 input group "=== Core ==="
 input long   InpMagic                 = 260726;   // Magic number
-input double InpRiskPercent           = 1.5;      // Risk % of equity (lot brain)
+input double InpRiskPercent           = 2.0;      // Risk % of equity (lot brain) — use 1~5, NOT 50
 input double InpMinLot                = 0.01;     // Minimum lot
 input double InpMaxLotCap             = 1.00;     // Maximum lot cap
 input int    InpMaxEntriesHard        = 15;       // Hard max entries
-input int    InpSlippagePoints        = 30;       // Order deviation (points)
+input int    InpSlippagePoints        = 50;       // Order deviation (points)
 input bool   InpAllowBuy              = true;
 input bool   InpAllowSell             = true;
 
 input group "=== Same-Price Burst ==="
 input double InpMaxSamePriceSlippage  = 0.0;      // Max distance from 1st fill (0=auto)
-input int    InpBurstGapMs            = 180;      // Min ms between burst adds
-input int    InpMaxBurstPerPulse      = 4;        // Max adds in one impulse pulse
+input int    InpBurstGapMs            = 100;      // Min ms between burst adds
+input int    InpMaxBurstPerPulse      = 3;        // Max adds in one impulse pulse
 
 input group "=== Adaptive Tick Window ==="
 input int    InpWindowMinSec          = 2;        // Min adaptive window (sec)
-input int    InpWindowMaxSec          = 30;       // Max adaptive window (sec)
+input int    InpWindowMaxSec          = 20;       // Max adaptive window (sec)
 input int    InpTickBufferSize        = 800;      // Tick ring buffer size
-input double InpImbalanceQuiet        = 0.55;     // Needed imbalance when quiet
-input double InpImbalanceBurst        = 0.52;     // Needed imbalance when bursty
+input double InpImbalanceQuiet        = 0.53;     // Needed imbalance when quiet
+input double InpImbalanceBurst        = 0.51;     // Needed imbalance when bursty
 input double InpMinNetMovePrice       = 0.0;      // Min net move in window (0=auto)
 
 input group "=== Pullback / Impulse ==="
-input int    InpMinImpulseTicks       = 5;        // Min ticks inside adaptive window
-input bool   InpRequirePullback       = false;    // false = can enter on strong impulse
-input double InpPullbackFrac          = 0.12;     // Pullback depth vs impulse move
-input double InpPullbackMaxFrac       = 0.95;     // Cancel if pullback too deep
-input int    InpSetupExpireSec        = 60;       // Cancel setup if stale
-input bool   InpUseCandleConfirm      = false;    // false = tick pressure enough to enter
+input int    InpMinImpulseTicks       = 3;        // Min ticks inside adaptive window
+input bool   InpRequirePullback       = false;    // false = enter on impulse (RECOMMENDED)
+input double InpPullbackFrac          = 0.10;     // Pullback depth vs impulse move
+input double InpPullbackMaxFrac       = 0.98;     // Cancel if pullback too deep
+input int    InpSetupExpireSec        = 90;       // Cancel setup if stale
+input bool   InpUseCandleConfirm      = false;    // false = tick/bar pressure enough
 
 input group "=== Risk Manager ==="
 input bool   InpUseDynamicLot         = true;     // Equity-based lot
 input bool   InpUseDynamicEntries     = true;     // Equity/signal-based entries
 input bool   InpSameLotPerCycle       = true;     // No martingale (same lot/cycle)
-input double InpDdDefensivePct        = 2.0;      // Floating DD% -> DEFENSIVE
-input double InpDdLockdownPct         = 4.0;      // Floating DD% -> LOCKDOWN
-input int    InpLossStreakDefensive   = 3;        // Losses in a row -> DEFENSIVE
-input int    InpLossStreakLockdown    = 6;        // Losses in a row -> LOCKDOWN
+input double InpDdDefensivePct        = 3.0;      // Floating DD% -> DEFENSIVE
+input double InpDdLockdownPct         = 6.0;      // Floating DD% -> LOCKDOWN
+input int    InpLossStreakDefensive   = 4;        // Losses in a row -> DEFENSIVE
+input int    InpLossStreakLockdown    = 8;        // Losses in a row -> LOCKDOWN
 
 input group "=== Smart Exit ==="
 input double InpMinProfitToSecure     = 0.0;      // Min $ profit before threat-close (0=auto)
-input double InpThreatImbalance       = 0.62;     // Opposite imbalance to threaten
-input double InpGivebackFrac          = 0.55;     // Close if give back this fraction of peak
+input double InpThreatImbalance       = 0.65;     // Opposite imbalance to threaten
+input double InpGivebackFrac          = 0.60;     // Close if give back this fraction of peak
 input double InpEmergencyStopDist     = 0.0;      // Emergency SL distance (0=auto)
-input int    InpCooldownSec           = 2;        // Seconds after full close
+input int    InpCooldownSec           = 1;        // Seconds after full close
 
 input group "=== Session (NY-London) ==="
-input bool   InpUseSessionFilter      = true;     // Trade new entries in session only
+input bool   InpUseSessionFilter      = false;    // false while testing; true for live NY-London
 input int    InpSessionTZOffsetHrs    = 8;        // Local TZ vs GMT (PH=8)
 input int    InpSessionStartHour      = 20;       // Session start hour (local)
 input int    InpSessionStartMinute    = 0;
@@ -82,15 +82,16 @@ input int    InpSessionEndHour        = 5;        // Session end hour (local) 8P
 input int    InpSessionEndMinute      = 0;
 
 input group "=== News / FOMC Guard ==="
-input bool   InpUseHardBlackouts      = true;     // 8:30-8:40 & 9:30-9:40 PM local
-input bool   InpUseCalendarFilter     = true;     // MT5 economic calendar
-input bool   InpBlockHighImpactUSD    = false;    // false = FOMC only (more entries)
+input bool   InpUseHardBlackouts      = false;    // false while testing; true for live
+input bool   InpUseCalendarFilter     = false;    // false while testing; true for live FOMC
+input bool   InpBlockHighImpactUSD    = false;    // false = FOMC only
 input int    InpNewsBufferMin         = 5;        // Minutes around high-impact USD
 input int    InpFomcBlockMin          = 30;       // Minutes around FOMC events
 input bool   InpCloseOnNewsThreat     = true;     // Allow exit brain during news block
 
 input group "=== Runtime ==="
 input bool   InpStrictSymbolCheck     = true;     // Only XAUUSD / US30 family
+input bool   InpUseBarFallback        = true;     // Use M1 momentum if ticks weak (tester fix)
 input int    InpMemoryTrades          = 12;       // Recent trades remembered
 input bool   InpPrintLogs             = true;     // Print key decisions
 
@@ -585,18 +586,83 @@ int BP_ClampI(const int v, const int lo, const int hi)
    return (int)MathMax(lo, MathMin(hi, v));
 }
 
+AdaptiveSignal BP_BuildBarFallbackSignal()
+{
+   // Strategy Tester / sparse ticks: use recent M1 momentum
+   AdaptiveSignal sig;
+   ZeroMemory(sig);
+   sig.bias = BP_BIAS_NONE;
+   if(!InpUseBarFallback) return sig;
+
+   double o[], c[], h[], l[];
+   ArraySetAsSeries(o, true);
+   ArraySetAsSeries(c, true);
+   ArraySetAsSeries(h, true);
+   ArraySetAsSeries(l, true);
+   if(CopyOpen(g_symbol, PERIOD_M1, 0, 4, o) < 4) return sig;
+   if(CopyClose(g_symbol, PERIOD_M1, 0, 4, c) < 4) return sig;
+   if(CopyHigh(g_symbol, PERIOD_M1, 0, 4, h) < 4) return sig;
+   if(CopyLow(g_symbol, PERIOD_M1, 0, 4, l) < 4) return sig;
+
+   const double move1 = c[1] - o[1];
+   const double move2 = c[2] - o[2];
+   const double net = (c[1] - c[3]);
+   const double range = MathMax(BP_Point(), h[1] - l[1]);
+   const double minMove = BP_MinNetMove() * 0.35;
+
+   sig.valid = true;
+   sig.windowSec = 60;
+   sig.ticksUsed = 3;
+   sig.ticksPerSec = 1.0;
+   sig.movePerSec = MathAbs(net) / 60.0;
+   sig.netMove = net;
+   sig.threshold = InpImbalanceBurst;
+
+   // Directional candle pressure
+   if(net > minMove && (move1 > 0.0 || c[0] > o[0]))
+   {
+      sig.upBias = 0.60;
+      sig.downBias = 0.40;
+      sig.bias = BP_BIAS_BUY;
+   }
+   else if(net < -minMove && (move1 < 0.0 || c[0] < o[0]))
+   {
+      sig.upBias = 0.40;
+      sig.downBias = 0.60;
+      sig.bias = BP_BIAS_SELL;
+   }
+   else if(move1 > range * 0.20 && move2 >= 0.0)
+   {
+      sig.upBias = 0.58;
+      sig.downBias = 0.42;
+      sig.netMove = move1;
+      sig.bias = BP_BIAS_BUY;
+   }
+   else if(move1 < -range * 0.20 && move2 <= 0.0)
+   {
+      sig.upBias = 0.42;
+      sig.downBias = 0.58;
+      sig.netMove = move1;
+      sig.bias = BP_BIAS_SELL;
+   }
+
+   return sig;
+}
+
 AdaptiveSignal BP_BuildSignal()
 {
    AdaptiveSignal sig;
    ZeroMemory(sig);
    sig.bias = BP_BIAS_NONE;
 
+   // Not enough ticks yet -> bar fallback (important for Strategy Tester)
    if(g_tick_count < InpMinImpulseTicks)
-      return sig;
+      return BP_BuildBarFallbackSignal();
 
    // Quick speed estimate from last ~3 seconds
    TickSample newest;
-   if(!BP_GetTick(0, newest)) return sig;
+   if(!BP_GetTick(0, newest))
+      return BP_BuildBarFallbackSignal();
 
    long newest_ms = newest.time_ms;
    int fastTicks = 0;
@@ -616,18 +682,16 @@ AdaptiveSignal BP_BuildSignal()
    sig.movePerSec  = mps;
 
    // Adaptive window seconds from speed
-   // Fast ticks => shorter window; slow => longer
-   double target = 16.0;
-   if(tps >= 8.0) target = 4.0;
-   else if(tps >= 4.0) target = 7.0;
-   else if(tps >= 2.0) target = 12.0;
-   else if(tps >= 1.0) target = 20.0;
-   else target = 35.0;
+   double target = 12.0;
+   if(tps >= 8.0) target = 3.0;
+   else if(tps >= 4.0) target = 5.0;
+   else if(tps >= 2.0) target = 8.0;
+   else if(tps >= 1.0) target = 12.0;
+   else target = 18.0;
 
-   // If price is moving hard, shorten a bit more
    const double unit = BP_AutoPriceUnit();
    if(mps > unit * 0.8) target *= 0.7;
-   if(mps < unit * 0.15) target *= 1.25;
+   if(mps < unit * 0.15) target *= 1.15;
 
    int winSec = BP_ClampI((int)MathRound(target), InpWindowMinSec, InpWindowMaxSec);
    sig.windowSec = winSec;
@@ -635,7 +699,6 @@ AdaptiveSignal BP_BuildSignal()
    long winMs = (long)winSec * 1000;
    int up = 0, down = 0, used = 0;
    double firstMid = newestMid;
-   double lastMid = newestMid;
 
    for(int i = 0; i < g_tick_count; i++)
    {
@@ -649,37 +712,42 @@ AdaptiveSignal BP_BuildSignal()
    }
 
    if(used < InpMinImpulseTicks)
-      return sig;
+      return BP_BuildBarFallbackSignal();
 
    const int dirTicks = up + down;
-   if(dirTicks <= 0) return sig;
+   if(dirTicks <= 0)
+      return BP_BuildBarFallbackSignal();
 
    sig.ticksUsed = used;
    sig.upBias = (double)up / (double)dirTicks;
    sig.downBias = (double)down / (double)dirTicks;
    sig.netMove = newestMid - firstMid;
 
-   // Adaptive threshold (lean toward more entries)
    double thr = InpImbalanceQuiet;
-   if(tps >= 3.0) thr = InpImbalanceBurst;
-   else if(tps >= 1.5) thr = 0.5 * (InpImbalanceBurst + InpImbalanceQuiet);
-   // Tiny accounts / slow ticks: accept slight majority if net move agrees
-   if(tps < 1.0) thr = MathMin(thr, 0.54);
+   if(tps >= 2.0) thr = InpImbalanceBurst;
+   else if(tps >= 1.0) thr = 0.5 * (InpImbalanceBurst + InpImbalanceQuiet);
+   if(tps < 1.0) thr = MathMin(thr, 0.52);
    sig.threshold = thr;
 
    const double minMove = BP_MinNetMove();
-   // Soft path: majority + any confirming net move
-   if(sig.upBias >= thr && sig.netMove > 0.0 && MathAbs(sig.netMove) >= minMove * 0.5)
+   if(sig.upBias >= thr && sig.netMove > 0.0 && MathAbs(sig.netMove) >= minMove * 0.25)
       sig.bias = BP_BIAS_BUY;
-   else if(sig.downBias >= thr && sig.netMove < 0.0 && MathAbs(sig.netMove) >= minMove * 0.5)
+   else if(sig.downBias >= thr && sig.netMove < 0.0 && MathAbs(sig.netMove) >= minMove * 0.25)
       sig.bias = BP_BIAS_SELL;
-   // Strong majority fallback even if move is small
-   else if(sig.upBias >= thr + 0.08 && sig.netMove >= 0.0)
+   else if(sig.upBias >= thr + 0.03 && sig.netMove >= 0.0)
       sig.bias = BP_BIAS_BUY;
-   else if(sig.downBias >= thr + 0.08 && sig.netMove <= 0.0)
+   else if(sig.downBias >= thr + 0.03 && sig.netMove <= 0.0)
       sig.bias = BP_BIAS_SELL;
 
    sig.valid = true;
+
+   // If tick path found no bias, try bar fallback
+   if(sig.bias == BP_BIAS_NONE)
+   {
+      AdaptiveSignal barSig = BP_BuildBarFallbackSignal();
+      if(barSig.bias != BP_BIAS_NONE)
+         return barSig;
+   }
    return sig;
 }
 
@@ -1592,11 +1660,17 @@ int OnInit()
    g_state = BP_IDLE;
    g_mode = BP_MODE_NORMAL;
 
-   BP_Log("Init OK symbol=" + g_symbol +
+   BP_Log("Init OK v1.20 symbol=" + g_symbol +
           " family=" + (g_is_gold ? "XAUUSD" : (g_is_us30 ? "US30" : "GENERIC")) +
           " maxEntries=" + IntegerToString(InpMaxEntriesHard) +
           " session=" + (InpUseSessionFilter ? "NY-London" : "OFF") +
-          " calendar=" + (InpUseCalendarFilter ? "ON" : "OFF"));
+          " news=" + (InpUseCalendarFilter || InpUseHardBlackouts ? "ON" : "OFF") +
+          " barFallback=" + (InpUseBarFallback ? "ON" : "OFF") +
+          " pullback=" + (InpRequirePullback ? "ON" : "OFF"));
+
+   if(MQLInfoInteger(MQL_TESTER))
+      BP_Log("Tester mode: use model Every tick / real ticks. Session/news default OFF for entries.");
+
    return INIT_SUCCEEDED;
 }
 
