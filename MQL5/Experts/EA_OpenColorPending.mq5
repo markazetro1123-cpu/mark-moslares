@@ -1,17 +1,16 @@
 //+------------------------------------------------------------------+
 //| EA_OpenColorPending.mq5                                          |
-//| Open-Color Pending Scalper v2.10                                 |
+//| Open-Color Pending Scalper v2.20                                 |
 //| Design: DESIGN_OpenColorPending.md                               |
 //|                                                                  |
-//| GREEN: BUY @ high, trail DOWN only, floor=open                   |
-//| RED:   SELL @ low, trail UP only, ceiling=open                   |
-//| Delay 5m | Buffer opposite@open | Adjustable RR secure           |
-//| Session time filter | Dynamic lot/entries | Emergency SL         |
+//| GREEN: BUY @ high + Counter SELL @ open (buffer)                 |
+//| RED:   SELL @ low + Counter BUY @ open (buffer)                  |
+//| Delay 5m | RR secure inputs | Session filter | Dynamic lot       |
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "2.10"
-#property description "OpenColor v2.10: RR inputs, session filter, delay, one-way pending trail"
+#property version   "2.20"
+#property description "OpenColor v2.20: counter buy/sell @ open, RR inputs, session filter"
 
 #include <Trade/Trade.mqh>
 
@@ -24,8 +23,10 @@ input double InpRiskPercent             = 2.0;    // Risk % for dynamic lot
 input double InpMinLot                  = 0.01;   // Minimum lot
 input double InpMaxLotCap               = 1.00;   // Maximum lot cap
 input int    InpSlippagePoints          = 40;     // Deviation points
-input bool   InpAllowBuy                = true;   // Allow BUY
-input bool   InpAllowSell               = true;   // Allow SELL
+input bool   InpAllowBuy                = true;   // Allow main BUY
+input bool   InpAllowSell               = true;   // Allow main SELL
+input bool   InpAllowCounterBuy         = true;   // Allow Counter BUY @ open (RED)
+input bool   InpAllowCounterSell        = true;   // Allow Counter SELL @ open (GREEN)
 
 input group "=== Session Clock (PH default) ==="
 input bool   InpUseSessionFilter        = true;   // Enable session time filter
@@ -59,10 +60,10 @@ const int OCP_FLAT        = 0;
 const int OCP_GREEN       = 1;
 const int OCP_RED         = 2;
 
-const string OCP_TAG_BUY_MAIN  = "OCP-BM";
-const string OCP_TAG_SELL_MAIN = "OCP-SM";
-const string OCP_TAG_BUY_OPEN  = "OCP-BO";
-const string OCP_TAG_SELL_OPEN = "OCP-SO";
+const string OCP_TAG_BUY_MAIN     = "OCP-BM";
+const string OCP_TAG_SELL_MAIN    = "OCP-SM";
+const string OCP_TAG_COUNTER_BUY  = "OCP-CB";
+const string OCP_TAG_COUNTER_SELL = "OCP-CS";
 
 //======================================================================
 // GLOBALS
@@ -514,8 +515,11 @@ void OCP_DeleteAllPendings()
 {
    OCP_DeleteByTag(OCP_TAG_BUY_MAIN);
    OCP_DeleteByTag(OCP_TAG_SELL_MAIN);
-   OCP_DeleteByTag(OCP_TAG_BUY_OPEN);
-   OCP_DeleteByTag(OCP_TAG_SELL_OPEN);
+   OCP_DeleteByTag(OCP_TAG_COUNTER_BUY);
+   OCP_DeleteByTag(OCP_TAG_COUNTER_SELL);
+   // cleanup legacy tags from older builds
+   OCP_DeleteByTag("OCP-BO");
+   OCP_DeleteByTag("OCP-SO");
 }
 
 int OCP_CountAllPendings()
@@ -756,25 +760,27 @@ bool OCP_ManageSellMain(const double candleOpen, const double latestLow)
 }
 
 //======================================================================
-// OPPOSITE @ OPEN (buffer rule)
-// GREEN + buffer: SELL LIMIT @ open
-// RED   + buffer: BUY  LIMIT @ open
+// COUNTER @ OPEN (buffer rule)
+// GREEN + buffer: Counter SELL STOP @ open (price above open)
+// RED   + buffer: Counter BUY  STOP @ open (price below open)
 //======================================================================
-bool OCP_ManageSellAtOpen(const double candleOpen)
+bool OCP_ManageCounterSell(const double candleOpen)
 {
-   if(!InpAllowSell || !OCP_TradeAllowed())
+   if(!InpAllowCounterSell || !OCP_TradeAllowed())
+   {
+      OCP_DeleteByTag(OCP_TAG_COUNTER_SELL);
       return false;
+   }
 
    double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
    double gap = OCP_PendingGap();
    double price = OCP_NormPrice(candleOpen);
 
-   // Sell Limit must be above bid
-   double minSellLimit = OCP_NormPrice(bid + MathMax(gap, OCP_StopsDistance() + OCP_Point()));
-   if(price < minSellLimit)
+   // On GREEN, open is below market -> SellStop @ open
+   double maxSellStop = OCP_NormPrice(bid - MathMax(gap, OCP_StopsDistance() + OCP_Point()));
+   if(price > maxSellStop)
    {
-      // open not usable as sell-limit right now
-      OCP_DeleteByTag(OCP_TAG_SELL_OPEN);
+      OCP_DeleteByTag(OCP_TAG_COUNTER_SELL);
       return false;
    }
 
@@ -785,12 +791,12 @@ bool OCP_ManageSellAtOpen(const double candleOpen)
 
    ulong ticket = 0;
    double curPrice = 0.0;
-   if(OCP_FindByTag(OCP_TAG_SELL_OPEN, ticket, curPrice))
+   if(OCP_FindByTag(OCP_TAG_COUNTER_SELL, ticket, curPrice))
    {
       if(MathAbs(curPrice - price) > OCP_Point() * 0.1)
       {
          if(!OCP_ModifyPending(ticket, price, sl))
-            OCP_Log("SELL-OPEN modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
+            OCP_Log("COUNTER-SELL modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
       }
       return true;
    }
@@ -804,31 +810,34 @@ bool OCP_ManageSellAtOpen(const double candleOpen)
    if(g_cycle_lot <= 0.0)
       g_cycle_lot = lot;
 
-   if(!g_trade.SellLimit(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, OCP_TAG_SELL_OPEN))
+   if(!g_trade.SellStop(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, OCP_TAG_COUNTER_SELL))
    {
-      OCP_Log("SELL-OPEN place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
+      OCP_Log("COUNTER-SELL place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
               " " + g_trade.ResultRetcodeDescription());
       return false;
    }
 
-   OCP_Log("SELL-OPEN placed @ open " + DoubleToString(price, OCP_Digits()));
+   OCP_Log("COUNTER-SELL placed @ open " + DoubleToString(price, OCP_Digits()));
    return true;
 }
 
-bool OCP_ManageBuyAtOpen(const double candleOpen)
+bool OCP_ManageCounterBuy(const double candleOpen)
 {
-   if(!InpAllowBuy || !OCP_TradeAllowed())
+   if(!InpAllowCounterBuy || !OCP_TradeAllowed())
+   {
+      OCP_DeleteByTag(OCP_TAG_COUNTER_BUY);
       return false;
+   }
 
    double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
    double gap = OCP_PendingGap();
    double price = OCP_NormPrice(candleOpen);
 
-   // Buy Limit must be below ask
-   double maxBuyLimit = OCP_NormPrice(ask - MathMax(gap, OCP_StopsDistance() + OCP_Point()));
-   if(price > maxBuyLimit)
+   // On RED, open is above market -> BuyStop @ open
+   double minBuyStop = OCP_NormPrice(ask + MathMax(gap, OCP_StopsDistance() + OCP_Point()));
+   if(price < minBuyStop)
    {
-      OCP_DeleteByTag(OCP_TAG_BUY_OPEN);
+      OCP_DeleteByTag(OCP_TAG_COUNTER_BUY);
       return false;
    }
 
@@ -839,12 +848,12 @@ bool OCP_ManageBuyAtOpen(const double candleOpen)
 
    ulong ticket = 0;
    double curPrice = 0.0;
-   if(OCP_FindByTag(OCP_TAG_BUY_OPEN, ticket, curPrice))
+   if(OCP_FindByTag(OCP_TAG_COUNTER_BUY, ticket, curPrice))
    {
       if(MathAbs(curPrice - price) > OCP_Point() * 0.1)
       {
          if(!OCP_ModifyPending(ticket, price, sl))
-            OCP_Log("BUY-OPEN modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
+            OCP_Log("COUNTER-BUY modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
       }
       return true;
    }
@@ -858,14 +867,14 @@ bool OCP_ManageBuyAtOpen(const double candleOpen)
    if(g_cycle_lot <= 0.0)
       g_cycle_lot = lot;
 
-   if(!g_trade.BuyLimit(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, OCP_TAG_BUY_OPEN))
+   if(!g_trade.BuyStop(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, OCP_TAG_COUNTER_BUY))
    {
-      OCP_Log("BUY-OPEN place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
+      OCP_Log("COUNTER-BUY place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
               " " + g_trade.ResultRetcodeDescription());
       return false;
    }
 
-   OCP_Log("BUY-OPEN placed @ open " + DoubleToString(price, OCP_Digits()));
+   OCP_Log("COUNTER-BUY placed @ open " + DoubleToString(price, OCP_Digits()));
    return true;
 }
 
@@ -1021,13 +1030,21 @@ void OCP_UpdateComment(const int candleColor,
          sessionText = "BLOCK";
    }
 
-   string line1 = "OpenColorPending v2.10";
+   string cbText = "OFF";
+   string csText = "OFF";
+   if(InpAllowCounterBuy)
+      cbText = "ON";
+   if(InpAllowCounterSell)
+      csText = "ON";
+   string counterText = "CB=" + cbText + " CS=" + csText;
+
+   string line1 = "OpenColorPending v2.20";
    string line2 = "Symbol: " + g_symbol + family + " | Session: " + sessionText;
    string line3 = "Open: " + DoubleToString(open0, OCP_Digits()) + " | Color: " + colorName;
    string line4 = "Current H/L: " + DoubleToString(high0, OCP_Digits()) + " / " + DoubleToString(low0, OCP_Digits());
    string line5 = "Previous H/L: " + DoubleToString(prevHigh, OCP_Digits()) + " / " + DoubleToString(prevLow, OCP_Digits());
    string line6 = "Delay: " + delayText + " | BufferOK: " + bufText +
-                  " (" + DoubleToString(OCP_BufferDistance(), OCP_Digits()) + ")";
+                  " (" + DoubleToString(OCP_BufferDistance(), OCP_Digits()) + ") | " + counterText;
    string line7 = "RR trigger/lock/step: " +
                   DoubleToString(OCP_SecureTrigger(), OCP_Digits()) + " / " +
                   DoubleToString(OCP_SecureLock(), OCP_Digits()) + " / " +
@@ -1081,37 +1098,34 @@ void OCP_OnTickLogic()
 
    if(candleColor == OCP_GREEN)
    {
-      // Main BUY only; cancel sell-main
+      // Main BUY + optional Counter SELL @ open
       OCP_DeleteByTag(OCP_TAG_SELL_MAIN);
+      OCP_DeleteByTag(OCP_TAG_COUNTER_BUY);
       OCP_ManageBuyMain(open0, high0);
 
       if(OCP_BufferOk(open0))
-         OCP_ManageSellAtOpen(open0);
+         OCP_ManageCounterSell(open0);
       else
-         OCP_DeleteByTag(OCP_TAG_SELL_OPEN);
-
-      // no buy@open on green
-      OCP_DeleteByTag(OCP_TAG_BUY_OPEN);
+         OCP_DeleteByTag(OCP_TAG_COUNTER_SELL);
    }
    else if(candleColor == OCP_RED)
    {
+      // Main SELL + optional Counter BUY @ open
       OCP_DeleteByTag(OCP_TAG_BUY_MAIN);
+      OCP_DeleteByTag(OCP_TAG_COUNTER_SELL);
       OCP_ManageSellMain(open0, low0);
 
       if(OCP_BufferOk(open0))
-         OCP_ManageBuyAtOpen(open0);
+         OCP_ManageCounterBuy(open0);
       else
-         OCP_DeleteByTag(OCP_TAG_BUY_OPEN);
-
-      OCP_DeleteByTag(OCP_TAG_SELL_OPEN);
+         OCP_DeleteByTag(OCP_TAG_COUNTER_BUY);
    }
    else
    {
-      // FLAT: cancel mains; keep open-side only if buffer still valid
       OCP_DeleteByTag(OCP_TAG_BUY_MAIN);
       OCP_DeleteByTag(OCP_TAG_SELL_MAIN);
-      OCP_DeleteByTag(OCP_TAG_BUY_OPEN);
-      OCP_DeleteByTag(OCP_TAG_SELL_OPEN);
+      OCP_DeleteByTag(OCP_TAG_COUNTER_BUY);
+      OCP_DeleteByTag(OCP_TAG_COUNTER_SELL);
    }
 }
 
@@ -1178,11 +1192,13 @@ int OnInit()
    if(InpUseSessionFilter)
       sessionMode = "ON";
 
-   OCP_Log("Init OK v2.10 | delay=" + IntegerToString(InpStructureDelayMinutes) +
+   OCP_Log("Init OK v2.20 | delay=" + IntegerToString(InpStructureDelayMinutes) +
            "m | buffer=" + DoubleToString(OCP_BufferDistance(), OCP_Digits()) +
            " | RR trigger/lock=" + DoubleToString(OCP_SecureTrigger(), OCP_Digits()) +
            "/" + DoubleToString(OCP_SecureLock(), OCP_Digits()) +
            " | sessionFilter=" + sessionMode +
+           " | counter B/S=" + IntegerToString((int)InpAllowCounterBuy) +
+           "/" + IntegerToString((int)InpAllowCounterSell) +
            " | symbol=" + g_symbol);
    return INIT_SUCCEEDED;
 }
