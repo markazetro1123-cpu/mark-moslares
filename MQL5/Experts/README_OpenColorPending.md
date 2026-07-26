@@ -1,28 +1,24 @@
-# EA_OpenColorPending v1.20 (clean build)
+# EA_OpenColorPending
 
-```
-MQL5/Experts/EA_OpenColorPending.mq5
-```
+**Design (full):** [`DESIGN_OpenColorPending.md`](./DESIGN_OpenColorPending.md) — **v2.00 confirmed**
 
-## Strategy
-1. Detect current candle **open**
-2. Below open = **RED** → SELL pending at latest **low** (trails down only)
-3. Above open = **GREEN** → BUY pending at latest **high** (trails up only)
-4. Tracks previous candle **HIGH/LOW**
-5. On fill → trail SL (example: `4399` → `4399.5`)
-6. After profit close → lock until next candle
-7. Emergency SL always set
+**EA file:** `EA_OpenColorPending.mq5` (implementation follows design v2.00)
 
-## Kept
-- Dynamic lot by equity
-- Dynamic entries (`$30–$50` → 2–3, max 15)
-- No martingale
-- XAUUSD + US30
+## Quick summary
+- 5-min structure delay before pending
+- GREEN → BUY pending @ high (trail down only, floor = open)
+- RED → SELL pending @ low (trail up only, ceiling = open)
+- Buffer ≥ 3 points → opposite pending @ **open** only
+- Fill → emergency SL + trail SL
+- Dynamic lot + dynamic entries kept (max 15)
 
 ## Install
-1. Download the **full** `.mq5` file (do not paste fragments into an old file like `GREENPENDING_2.mq5`)
-2. MetaEditor → Compile → expect **0 errors / 0 warnings**
-3. Attach to XAUUSD or US30 chart → Algo Trading ON
+1. Use the full `.mq5` from this branch (replace entire file)
+2. MetaEditor Compile → 0 errors / 0 warnings
+3. Attach to XAUUSD or US30 → Algo Trading ON
 
-Raw:
+Raw EA:
 `https://raw.githubusercontent.com/markazetro1123-cpu/mark-moslares/cursor/open-color-pending-b063/MQL5/Experts/EA_OpenColorPending.mq5`
+
+Raw Design:
+`https://raw.githubusercontent.com/markazetro1123-cpu/mark-moslares/cursor/open-color-pending-b063/MQL5/Experts/DESIGN_OpenColorPending.md`
