@@ -1,85 +1,92 @@
 //+------------------------------------------------------------------+
 //| EA_OpenColorPending.mq5                                          |
-//| Open-price color pending + trail (XAUUSD / US30)                 |
+//| Open-Color Pending Scalper v1.10 (clean build)                   |
 //|                                                                  |
-//| ENTRY STRATEGY:                                                  |
-//|  - Watch CURRENT candle open                                     |
-//|  - Below open = RED  -> SELL pending only at latest low          |
-//|  - Above open = GREEN -> BUY pending only at latest high         |
-//|  - Detect previous candle HIGH / LOW                             |
-//|  - On fill: trail SL (ex: price 4399 -> SL 4399.5)               |
-//|  - After profit on that side/candle -> cooldown until next candle|
-//|  - Emergency SL always attached                                  |
+//| Strategy:                                                        |
+//|  1) Detect CURRENT candle open                                   |
+//|  2) Below open = RED  -> SELL pending at latest LOW only         |
+//|  3) Above open = GREEN -> BUY pending at latest HIGH only        |
+//|  4) Track previous candle HIGH / LOW                             |
+//|  5) On fill: trail SL (ex: 4399 -> SL 4399.5)                    |
+//|  6) After profit close -> lock until next candle                 |
+//|  7) Emergency SL always attached                                 |
 //|                                                                  |
-//| KEPT FROM BEFORE:                                                |
+//| Kept:                                                            |
 //|  - Dynamic lot by equity                                         |
-//|  - Dynamic entry count by equity (max 15, $30-$50 => 2-3)        |
-//|  - No martingale (same lot per candle cycle)                     |
+//|  - Dynamic entries by equity (max 15, $30-$50 => 2-3)            |
+//|  - No martingale (same lot per candle)                           |
+//|  - XAUUSD + US30                                                 |
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.00"
-#property description "Open-color pending: red=sell@low, green=buy@high, trail SL, dynamic lot/entries"
+#property version   "1.10"
+#property description "OpenColor v1.10: red=sell@low, green=buy@high, trail, dynamic lot/entries"
 
 #include <Trade/Trade.mqh>
 
 //======================================================================
-// INPUTS (minimal)
+// INPUTS
 //======================================================================
 input group "=== Account / Broker ==="
-input long   InpMagic           = 260728;  // Magic number
-input double InpRiskPercent     = 2.0;     // Risk % for dynamic lot
-input double InpMinLot          = 0.01;    // Min lot
-input double InpMaxLotCap       = 1.00;    // Max lot cap
-input int    InpSlippagePoints  = 40;      // Deviation
-input bool   InpAllowBuy        = true;
-input bool   InpAllowSell       = true;
+input long     InpMagic          = 260728;   // Magic number
+input double   InpRiskPercent    = 2.0;      // Risk % for dynamic lot
+input double   InpMinLot         = 0.01;     // Minimum lot
+input double   InpMaxLotCap      = 1.00;     // Maximum lot cap
+input int      InpSlippagePoints = 40;       // Order deviation (points)
+input bool     InpAllowBuy       = true;     // Allow BUY side
+input bool     InpAllowSell      = true;     // Allow SELL side
 
 input group "=== Trail / Stops ==="
-input double InpTrailDistance   = 0.0;     // Trail distance (0=auto)
-input double InpEmergencySL     = 0.0;     // Emergency SL distance (0=auto)
-input double InpPendingOffset   = 0.0;     // Extra offset from high/low (0=auto)
+input double   InpTrailDistance  = 0.0;      // Trail distance (0 = auto)
+input double   InpEmergencySL    = 0.0;      // Emergency SL distance (0 = auto)
+input double   InpPendingOffset  = 0.0;      // Pending gap from market (0 = auto)
 
 input group "=== Runtime ==="
-input bool   InpPrintLogs       = true;
+input bool     InpPrintLogs      = true;     // Print logs
 
 //======================================================================
-// CONSTANTS (dynamic entries kept)
+// CONSTANTS / ENUMS
 //======================================================================
-const int OCP_MAX_ENTRIES = 15;
+#define OCP_MAX_ENTRIES 15
 
 enum ENUM_OCP_COLOR
 {
-   OCP_NONE = 0,
-   OCP_GREEN = 1,
-   OCP_RED = -1
+   OCP_COLOR_NONE  = 0,
+   OCP_COLOR_GREEN = 1,
+   OCP_COLOR_RED   = -1
 };
 
 //======================================================================
-CTrade trade;
-string g_symbol;
-bool   g_ok = false;
-bool   g_is_gold = false;
-bool   g_is_us30 = false;
+// GLOBALS
+//======================================================================
+CTrade   g_trade;
+string   g_symbol;
+bool     g_ready     = false;
+bool     g_is_gold   = false;
+bool     g_is_us30   = false;
 
-datetime g_candle_time = 0;
-bool     g_profit_lock = false;     // after profit this candle -> stop
-double   g_cycle_lot = 0.0;
-string   g_last_log = "";
+datetime g_bar_time    = 0;
+bool     g_profit_lock = false;
+double   g_cycle_lot   = 0.0;
+string   g_last_log    = "";
 
 //======================================================================
-void OCP_Log(const string msg)
+// UTILS
+//======================================================================
+void OCP_Log(const string message)
 {
-   if(!InpPrintLogs) return;
-   if(msg == g_last_log) return;
-   g_last_log = msg;
-   Print("[OpenColor] ", msg);
+   if(!InpPrintLogs)
+      return;
+   if(message == g_last_log)
+      return;
+   g_last_log = message;
+   Print("[OpenColor] ", message);
 }
 
 double OCP_Point()
 {
-   const double p = SymbolInfoDouble(g_symbol, SYMBOL_POINT);
-   return (p > 0.0 ? p : _Point);
+   const double point = SymbolInfoDouble(g_symbol, SYMBOL_POINT);
+   return (point > 0.0 ? point : _Point);
 }
 
 int OCP_Digits()
@@ -92,422 +99,533 @@ double OCP_NormPrice(const double price)
    return NormalizeDouble(price, OCP_Digits());
 }
 
-double OCP_NormVol(double vol)
+double OCP_NormVolume(double volume)
 {
    const double vmin  = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN);
    const double vmax  = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MAX);
    const double vstep = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_STEP);
-   if(vstep <= 0.0) return vmin;
-   vol = MathFloor(vol / vstep + 1e-12) * vstep;
-   vol = MathMax(vmin, MathMin(vmax, vol));
-   vol = MathMax(InpMinLot, MathMin(InpMaxLotCap, vol));
-   int d = 2;
-   if(vstep < 0.01) d = 3;
-   if(vstep >= 1.0) d = 0;
-   return NormalizeDouble(vol, d);
+
+   if(vstep <= 0.0)
+      return vmin;
+
+   volume = MathFloor(volume / vstep + 1e-12) * vstep;
+   volume = MathMax(vmin, MathMin(vmax, volume));
+   volume = MathMax(InpMinLot, MathMin(InpMaxLotCap, volume));
+
+   int digits = 2;
+   if(vstep < 0.01)
+      digits = 3;
+   if(vstep >= 1.0)
+      digits = 0;
+
+   return NormalizeDouble(volume, digits);
 }
 
 bool OCP_SelectFilling(ENUM_ORDER_TYPE_FILLING &filling)
 {
    const int modes = (int)SymbolInfoInteger(g_symbol, SYMBOL_FILLING_MODE);
-   if((modes & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC) { filling = ORDER_FILLING_IOC; return true; }
-   if((modes & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK) { filling = ORDER_FILLING_FOK; return true; }
+
+   if((modes & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+   {
+      filling = ORDER_FILLING_IOC;
+      return true;
+   }
+   if((modes & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+   {
+      filling = ORDER_FILLING_FOK;
+      return true;
+   }
+
    filling = ORDER_FILLING_RETURN;
    return true;
 }
 
-double OCP_StopsDist()
+void OCP_PrepareTrade()
+{
+   ENUM_ORDER_TYPE_FILLING filling;
+   OCP_SelectFilling(filling);
+   g_trade.SetExpertMagicNumber(InpMagic);
+   g_trade.SetDeviationInPoints(InpSlippagePoints);
+   g_trade.SetTypeFilling(filling);
+}
+
+double OCP_StopsDistance()
 {
    const int stops  = (int)SymbolInfoInteger(g_symbol, SYMBOL_TRADE_STOPS_LEVEL);
    const int freeze = (int)SymbolInfoInteger(g_symbol, SYMBOL_TRADE_FREEZE_LEVEL);
-   return MathMax(stops, freeze) * OCP_Point();
+   return (double)MathMax(stops, freeze) * OCP_Point();
 }
 
-bool OCP_TradeOk()
+bool OCP_TradeAllowed()
 {
-   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return false;
-   if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return false;
-   if(SymbolInfoInteger(g_symbol, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED) return false;
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+      return false;
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
+      return false;
+   if(SymbolInfoInteger(g_symbol, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED)
+      return false;
    return true;
 }
 
-string OCP_Upper(string s){ StringToUpper(s); return s; }
-
-bool OCP_IsGold(const string s)
+string OCP_ToUpper(string text)
 {
-   const string u = OCP_Upper(s);
-   return (StringFind(u, "XAUUSD") >= 0 || (StringFind(u, "GOLD") >= 0 && StringFind(u, "GOLDF") < 0));
+   StringToUpper(text);
+   return text;
 }
 
-bool OCP_IsUS30(const string s)
+bool OCP_IsGoldSymbol(const string symbol)
 {
-   const string u = OCP_Upper(s);
-   return (StringFind(u, "US30") >= 0 || StringFind(u, "DJ30") >= 0 || StringFind(u, "DJIA") >= 0 ||
-           StringFind(u, "WALLSTREET30") >= 0 || StringFind(u, "WST30") >= 0 || StringFind(u, "DOWJONES") >= 0);
+   const string u = OCP_ToUpper(symbol);
+   if(StringFind(u, "XAUUSD") >= 0)
+      return true;
+   if(StringFind(u, "GOLD") >= 0 && StringFind(u, "GOLDF") < 0)
+      return true;
+   return false;
+}
+
+bool OCP_IsUS30Symbol(const string symbol)
+{
+   const string u = OCP_ToUpper(symbol);
+   if(StringFind(u, "US30") >= 0)
+      return true;
+   if(StringFind(u, "DJ30") >= 0)
+      return true;
+   if(StringFind(u, "DJIA") >= 0)
+      return true;
+   if(StringFind(u, "WALLSTREET30") >= 0)
+      return true;
+   if(StringFind(u, "WST30") >= 0)
+      return true;
+   if(StringFind(u, "DOWJONES") >= 0)
+      return true;
+   return false;
 }
 
 bool OCP_ValidateSymbol()
 {
-   g_symbol = _Symbol;
-   g_is_gold = OCP_IsGold(g_symbol);
-   g_is_us30 = OCP_IsUS30(g_symbol);
-   g_ok = (g_is_gold || g_is_us30);
-   if(!g_ok)
+   g_symbol  = _Symbol;
+   g_is_gold = OCP_IsGoldSymbol(g_symbol);
+   g_is_us30 = OCP_IsUS30Symbol(g_symbol);
+   g_ready   = (g_is_gold || g_is_us30);
+
+   if(!g_ready)
    {
-      OCP_Log("Unsupported symbol (use XAUUSD / US30 family): " + g_symbol);
+      OCP_Log("Unsupported symbol. Use XAUUSD or US30 family. Symbol=" + g_symbol);
       return false;
    }
    return true;
 }
 
-double OCP_TrailDist()
+double OCP_TrailDistance()
 {
-   // Example behavior: 4399 -> SL 4399.5 => 0.5 on US30
-   if(InpTrailDistance > 0.0) return InpTrailDistance;
-   if(g_is_us30) return MathMax(0.5, 50.0 * OCP_Point());
+   // Example: price 4399 -> SL 4399.5 => distance 0.5 on US30
+   if(InpTrailDistance > 0.0)
+      return InpTrailDistance;
+   if(g_is_us30)
+      return MathMax(0.5, 50.0 * OCP_Point());
    return MathMax(0.20, 50.0 * OCP_Point());
 }
 
-double OCP_EmergencyDist()
+double OCP_EmergencyDistance()
 {
-   if(InpEmergencySL > 0.0) return InpEmergencySL;
-   if(g_is_us30) return MathMax(25.0, 800.0 * OCP_Point());
+   if(InpEmergencySL > 0.0)
+      return InpEmergencySL;
+   if(g_is_us30)
+      return MathMax(25.0, 800.0 * OCP_Point());
    return MathMax(3.0, 800.0 * OCP_Point());
 }
 
 double OCP_PendingGap()
 {
-   if(InpPendingOffset > 0.0) return InpPendingOffset;
-   return MathMax(OCP_StopsDist() + 2.0 * OCP_Point(), (g_is_us30 ? 0.5 : 0.05));
+   if(InpPendingOffset > 0.0)
+      return InpPendingOffset;
+
+   const double brokerMin = OCP_StopsDistance() + 2.0 * OCP_Point();
+   const double softMin   = (g_is_us30 ? 0.5 : 0.05);
+   return MathMax(brokerMin, softMin);
 }
 
 //======================================================================
-// DYNAMIC LOT + ENTRIES (kept)
+// DYNAMIC LOT + ENTRIES
 //======================================================================
-int OCP_BaseEntries(const double eq)
+int OCP_BaseEntriesByEquity(const double equity)
 {
-   if(eq < 20.0) return 1;
-   if(eq < 30.0) return 2;
-   if(eq < 80.0) return 3;   // $30-$50 zone -> up to 3
-   if(eq < 150.0) return 4;
-   if(eq < 300.0) return 6;
-   if(eq < 600.0) return 8;
-   if(eq < 1200.0) return 11;
-   if(eq < 2500.0) return 13;
+   if(equity < 20.0)
+      return 1;
+   if(equity < 30.0)
+      return 2;
+   if(equity < 80.0)
+      return 3;   // $30-$50 can use up to 3
+   if(equity < 150.0)
+      return 4;
+   if(equity < 300.0)
+      return 6;
+   if(equity < 600.0)
+      return 8;
+   if(equity < 1200.0)
+      return 11;
+   if(equity < 2500.0)
+      return 13;
    return OCP_MAX_ENTRIES;
 }
 
 int OCP_AllowedEntries()
 {
-   const int n = OCP_BaseEntries(AccountInfoDouble(ACCOUNT_EQUITY));
-   return (int)MathMax(1, MathMin(OCP_MAX_ENTRIES, n));
+   const int n = OCP_BaseEntriesByEquity(AccountInfoDouble(ACCOUNT_EQUITY));
+   if(n < 1)
+      return 1;
+   if(n > OCP_MAX_ENTRIES)
+      return OCP_MAX_ENTRIES;
+   return n;
 }
 
-double OCP_LossPerLot(const double dist)
+double OCP_LossPerLot(const double distance)
 {
-   if(dist <= 0.0) return 0.0;
-   const double ts = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
-   const double tv = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
-   if(ts <= 0.0 || tv <= 0.0) return 0.0;
-   return (dist / ts) * tv;
+   if(distance <= 0.0)
+      return 0.0;
+
+   const double tickSize  = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_SIZE);
+   const double tickValue = SymbolInfoDouble(g_symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickSize <= 0.0 || tickValue <= 0.0)
+      return 0.0;
+
+   return (distance / tickSize) * tickValue;
 }
 
-double OCP_MaxLotMargin(const ENUM_ORDER_TYPE type, const double price)
+double OCP_MaxLotByMargin(const ENUM_ORDER_TYPE orderType, const double price)
 {
-   const double free = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
-   const double vmin = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN);
-   if(free <= 0.0) return vmin;
-   double m1 = 0.0;
-   if(!OrderCalcMargin(type, g_symbol, 1.0, price, m1) || m1 <= 0.0)
+   const double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   const double minLot     = SymbolInfoDouble(g_symbol, SYMBOL_VOLUME_MIN);
+   if(freeMargin <= 0.0)
+      return minLot;
+
+   double marginOneLot = 0.0;
+   if(!OrderCalcMargin(orderType, g_symbol, 1.0, price, marginOneLot) || marginOneLot <= 0.0)
    {
-      double mm = 0.0;
-      if(!OrderCalcMargin(type, g_symbol, vmin, price, mm) || mm <= 0.0) return vmin;
-      m1 = mm / vmin;
+      double marginMin = 0.0;
+      if(!OrderCalcMargin(orderType, g_symbol, minLot, price, marginMin) || marginMin <= 0.0)
+         return minLot;
+      marginOneLot = marginMin / minLot;
    }
-   return OCP_NormVol((free * 0.65) / m1);
+
+   return OCP_NormVolume((freeMargin * 0.65) / marginOneLot);
 }
 
-double OCP_CalcLot(const ENUM_ORDER_TYPE type, const double price)
+double OCP_CalcLot(const ENUM_ORDER_TYPE orderType, const double price)
 {
+   // No martingale: reuse lot for whole candle cycle
    if(g_cycle_lot > 0.0)
-      return OCP_NormVol(g_cycle_lot);
+      return OCP_NormVolume(g_cycle_lot);
 
-   const double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   const double lpl = OCP_LossPerLot(OCP_EmergencyDist());
+   const double equity     = AccountInfoDouble(ACCOUNT_EQUITY);
+   const double lossPerLot = OCP_LossPerLot(OCP_EmergencyDistance());
+
    double lot = InpMinLot;
-   if(lpl > 0.0)
-      lot = (eq * InpRiskPercent / 100.0) / lpl;
+   if(lossPerLot > 0.0)
+      lot = (equity * InpRiskPercent / 100.0) / lossPerLot;
 
-   if(eq >= 100.0)  lot = MathMax(lot, InpMinLot * 2.0);
-   if(eq >= 250.0)  lot = MathMax(lot, InpMinLot * 3.0);
-   if(eq >= 500.0)  lot = MathMax(lot, InpMinLot * 5.0);
-   if(eq >= 1000.0) lot = MathMax(lot, InpMinLot * 8.0);
-   if(eq >= 2000.0) lot = MathMax(lot, InpMinLot * 12.0);
+   if(equity >= 100.0)
+      lot = MathMax(lot, InpMinLot * 2.0);
+   if(equity >= 250.0)
+      lot = MathMax(lot, InpMinLot * 3.0);
+   if(equity >= 500.0)
+      lot = MathMax(lot, InpMinLot * 5.0);
+   if(equity >= 1000.0)
+      lot = MathMax(lot, InpMinLot * 8.0);
+   if(equity >= 2000.0)
+      lot = MathMax(lot, InpMinLot * 12.0);
 
-   lot = MathMin(lot, OCP_MaxLotMargin(type, price));
-   return OCP_NormVol(lot);
+   lot = MathMin(lot, OCP_MaxLotByMargin(orderType, price));
+   return OCP_NormVolume(lot);
 }
 
 //======================================================================
-// CANDLE DATA
+// CANDLE HELPERS
 //======================================================================
-bool OCP_GetCandle(const int shift, datetime &t, double &o, double &h, double &l, double &c)
+bool OCP_CopyBar(const int shift, datetime &barTime, double &open, double &high, double &low)
 {
-   double oo[], hh[], ll[], cc[];
-   datetime tt[];
-   ArraySetAsSeries(oo, true);
-   ArraySetAsSeries(hh, true);
-   ArraySetAsSeries(ll, true);
-   ArraySetAsSeries(cc, true);
-   ArraySetAsSeries(tt, true);
-   if(CopyOpen(g_symbol, PERIOD_CURRENT, shift, 1, oo) < 1) return false;
-   if(CopyHigh(g_symbol, PERIOD_CURRENT, shift, 1, hh) < 1) return false;
-   if(CopyLow(g_symbol, PERIOD_CURRENT, shift, 1, ll) < 1) return false;
-   if(CopyClose(g_symbol, PERIOD_CURRENT, shift, 1, cc) < 1) return false;
-   if(CopyTime(g_symbol, PERIOD_CURRENT, shift, 1, tt) < 1) return false;
-   t = tt[0]; o = oo[0]; h = hh[0]; l = ll[0]; c = cc[0];
+   datetime times[];
+   double   opens[];
+   double   highs[];
+   double   lows[];
+
+   ArraySetAsSeries(times, true);
+   ArraySetAsSeries(opens, true);
+   ArraySetAsSeries(highs, true);
+   ArraySetAsSeries(lows, true);
+
+   if(CopyTime(g_symbol, PERIOD_CURRENT, shift, 1, times) < 1)
+      return false;
+   if(CopyOpen(g_symbol, PERIOD_CURRENT, shift, 1, opens) < 1)
+      return false;
+   if(CopyHigh(g_symbol, PERIOD_CURRENT, shift, 1, highs) < 1)
+      return false;
+   if(CopyLow(g_symbol, PERIOD_CURRENT, shift, 1, lows) < 1)
+      return false;
+
+   barTime = times[0];
+   open    = opens[0];
+   high    = highs[0];
+   low     = lows[0];
    return true;
 }
 
-ENUM_OCP_COLOR OCP_ColorFromOpen(const double openPrice)
+ENUM_OCP_COLOR OCP_DetectColor(const double openPrice)
 {
    const double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
    const double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
-   if(bid <= 0.0 || ask <= 0.0 || openPrice <= 0.0) return OCP_NONE;
+   if(bid <= 0.0 || ask <= 0.0 || openPrice <= 0.0)
+      return OCP_COLOR_NONE;
+
    const double mid = (bid + ask) * 0.5;
-   if(mid < openPrice) return OCP_RED;
-   if(mid > openPrice) return OCP_GREEN;
-   return OCP_NONE;
+   if(mid < openPrice)
+      return OCP_COLOR_RED;
+   if(mid > openPrice)
+      return OCP_COLOR_GREEN;
+   return OCP_COLOR_NONE;
 }
 
 //======================================================================
-// POSITIONS / ORDERS
+// POSITION / ORDER HELPERS
 //======================================================================
 int OCP_CountPositions()
 {
-   int n = 0;
+   int count = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       const ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != g_symbol) continue;
-      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
-      n++;
+      if(ticket == 0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != g_symbol)
+         continue;
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+      count++;
    }
-   return n;
+   return count;
 }
 
-int OCP_CountPendings(const long typeFilter = -1)
+int OCP_CountPendingsByType(const ENUM_ORDER_TYPE orderType)
 {
-   int n = 0;
+   int count = 0;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
       const ulong ticket = OrderGetTicket(i);
-      if(ticket == 0) continue;
-      if(!OrderSelect(ticket)) continue;
-      if(OrderGetString(ORDER_SYMBOL) != g_symbol) continue;
-      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic) continue;
-      const long type = OrderGetInteger(ORDER_TYPE);
-      if(typeFilter >= 0 && type != typeFilter) continue;
-      if(type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_SELL_STOP ||
-         type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_SELL_LIMIT)
-         n++;
+      if(ticket == 0)
+         continue;
+      if(!OrderSelect(ticket))
+         continue;
+      if(OrderGetString(ORDER_SYMBOL) != g_symbol)
+         continue;
+      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic)
+         continue;
+      if((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) != orderType)
+         continue;
+      count++;
    }
-   return n;
+   return count;
 }
 
-void OCP_DeletePendings(const bool buys, const bool sells)
+int OCP_CountAllPendings()
+{
+   return OCP_CountPendingsByType(ORDER_TYPE_BUY_STOP) +
+          OCP_CountPendingsByType(ORDER_TYPE_SELL_STOP) +
+          OCP_CountPendingsByType(ORDER_TYPE_BUY_LIMIT) +
+          OCP_CountPendingsByType(ORDER_TYPE_SELL_LIMIT);
+}
+
+void OCP_DeletePendings(const bool deleteBuys, const bool deleteSells)
 {
    for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
       const ulong ticket = OrderGetTicket(i);
-      if(ticket == 0 || !OrderSelect(ticket)) continue;
-      if(OrderGetString(ORDER_SYMBOL) != g_symbol) continue;
-      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic) continue;
-      const long type = OrderGetInteger(ORDER_TYPE);
-      const bool isBuy = (type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_BUY_LIMIT);
+      if(ticket == 0)
+         continue;
+      if(!OrderSelect(ticket))
+         continue;
+      if(OrderGetString(ORDER_SYMBOL) != g_symbol)
+         continue;
+      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic)
+         continue;
+
+      const ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      const bool isBuy  = (type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_BUY_LIMIT);
       const bool isSell = (type == ORDER_TYPE_SELL_STOP || type == ORDER_TYPE_SELL_LIMIT);
-      if((buys && isBuy) || (sells && isSell))
-         trade.OrderDelete(ticket);
+
+      if((deleteBuys && isBuy) || (deleteSells && isSell))
+         g_trade.OrderDelete(ticket);
    }
 }
 
-bool OCP_FindPending(const long type, ulong &ticket, double &price)
+bool OCP_FindPending(const ENUM_ORDER_TYPE orderType, ulong &ticket, double &price)
 {
    ticket = 0;
-   price = 0.0;
+   price  = 0.0;
+
    for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
       const ulong t = OrderGetTicket(i);
-      if(t == 0 || !OrderSelect(t)) continue;
-      if(OrderGetString(ORDER_SYMBOL) != g_symbol) continue;
-      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic) continue;
-      if((long)OrderGetInteger(ORDER_TYPE) != type) continue;
+      if(t == 0)
+         continue;
+      if(!OrderSelect(t))
+         continue;
+      if(OrderGetString(ORDER_SYMBOL) != g_symbol)
+         continue;
+      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic)
+         continue;
+      if((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE) != orderType)
+         continue;
+
       ticket = t;
-      price = OrderGetDouble(ORDER_PRICE_OPEN);
+      price  = OrderGetDouble(ORDER_PRICE_OPEN);
       return true;
    }
    return false;
 }
 
-double OCP_FloatingProfit()
-{
-   double pnl = 0.0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      const ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != g_symbol) continue;
-      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
-      pnl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-   }
-   return pnl;
-}
-
-bool OCP_CloseAll(const string why)
-{
-   bool ok = true;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      const ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != g_symbol) continue;
-      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
-      if(!trade.PositionClose(ticket)) ok = false;
-   }
-   if(ok) OCP_Log("Closed all: " + why);
-   return ok;
-}
-
 //======================================================================
-// ENTRY ENGINE (new strategy)
+// ENTRY ENGINE
 //======================================================================
-bool OCP_PlaceOrMoveSellAtLow(const double latestLow, const double prevHigh)
+bool OCP_PlaceOrMoveSellStop(const double latestLow, const double prevHigh)
 {
-   if(!InpAllowSell || !OCP_TradeOk()) return false;
+   if(!InpAllowSell || !OCP_TradeAllowed())
+      return false;
 
    const double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
    const double gap = OCP_PendingGap();
-   // SellStop at latest low (below/at market side for continuation down)
-   double price = OCP_NormPrice(latestLow);
-   // ensure valid stop distance from market
-   const double minSell = OCP_NormPrice(bid - MathMax(gap, OCP_StopsDist() + OCP_Point()));
-   if(price > minSell)
-      price = minSell;
 
-   const double emerg = MathMax(OCP_EmergencyDist(), OCP_StopsDist() + 2.0 * OCP_Point());
-   // emergency SL above entry; also respect previous high as structure ceiling helper
-   double sl = OCP_NormPrice(price + emerg);
+   double price = OCP_NormPrice(latestLow);
+   const double maxValidSell = OCP_NormPrice(bid - MathMax(gap, OCP_StopsDistance() + OCP_Point()));
+   if(price > maxValidSell)
+      price = maxValidSell;
+
+   const double emergency = MathMax(OCP_EmergencyDistance(), OCP_StopsDistance() + 2.0 * OCP_Point());
+   double sl = OCP_NormPrice(price + emergency);
    if(prevHigh > 0.0)
       sl = OCP_NormPrice(MathMax(sl, prevHigh + gap));
 
    const int allowed = OCP_AllowedEntries();
-   const int openN = OCP_CountPositions();
-   const int pendN = OCP_CountPendings(ORDER_TYPE_SELL_STOP);
-   const int room = allowed - openN;
-   if(room <= 0) return false;
+   const int openCount = OCP_CountPositions();
+   const int room = allowed - openCount;
+   if(room <= 0)
+      return false;
 
-   ENUM_ORDER_TYPE_FILLING fill;
-   OCP_SelectFilling(fill);
-   trade.SetExpertMagicNumber(InpMagic);
-   trade.SetDeviationInPoints(InpSlippagePoints);
-   trade.SetTypeFilling(fill);
+   OCP_PrepareTrade();
 
-   ulong ticket = 0;
-   double oldPrice = 0.0;
-   if(OCP_FindPending(ORDER_TYPE_SELL_STOP, ticket, oldPrice))
+   ulong  pendingTicket = 0;
+   double pendingPrice  = 0.0;
+   if(OCP_FindPending(ORDER_TYPE_SELL_STOP, pendingTicket, pendingPrice))
    {
-      // one-way: only move pending DOWN to newer low
-      if(price < oldPrice - OCP_Point() * 0.5)
+      // One-way only: move pending down when new low forms
+      if(price < pendingPrice - (OCP_Point() * 0.5))
       {
-         if(!trade.OrderModify(ticket, price, sl, 0.0, 0))
-            OCP_Log("SellStop modify fail " + IntegerToString((int)trade.ResultRetcode()));
+         if(!g_trade.OrderModify(pendingTicket, price, sl, 0.0, ORDER_TIME_GTC, 0))
+            OCP_Log("SellStop modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
          else
-            OCP_Log("SELL pending trail low -> " + DoubleToString(price, OCP_Digits()));
+            OCP_Log("SELL pending moved to low " + DoubleToString(price, OCP_Digits()));
       }
       return true;
    }
 
-   if(pendN > 0) return true;
+   if(OCP_CountPendingsByType(ORDER_TYPE_SELL_STOP) > 0)
+      return true;
 
-   // Dynamic entries as one pending volume (same price; brokers reject duplicate stops)
-   const int legs = MathMin(room, (openN == 0 ? MathMin(3, allowed) : 1));
+   int legs = room;
+   if(openCount == 0)
+      legs = MathMin(room, MathMin(3, allowed));
+   else
+      legs = 1;
+
    const double baseLot = OCP_CalcLot(ORDER_TYPE_SELL, price);
-   if(baseLot <= 0.0) return false;
-   if(g_cycle_lot <= 0.0) g_cycle_lot = baseLot;
-   const double lot = OCP_NormVol(baseLot * legs);
+   if(baseLot <= 0.0)
+      return false;
+   if(g_cycle_lot <= 0.0)
+      g_cycle_lot = baseLot;
 
-   if(!trade.SellStop(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, "OCP-SELL"))
+   const double lot = OCP_NormVolume(baseLot * (double)legs);
+   if(!g_trade.SellStop(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, "OCP-SELL"))
    {
-      OCP_Log("SellStop place fail " + IntegerToString((int)trade.ResultRetcode()) +
-              " " + trade.ResultRetcodeDescription());
+      OCP_Log("SellStop place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
+              " " + g_trade.ResultRetcodeDescription());
       return false;
    }
-   OCP_Log("SELL pending @ low " + DoubleToString(price, OCP_Digits()) +
-           " lot=" + DoubleToString(lot, 2) + " (legs=" + IntegerToString(legs) + ")" +
+
+   OCP_Log("SELL pending @ " + DoubleToString(price, OCP_Digits()) +
+           " lot=" + DoubleToString(lot, 2) +
+           " legs=" + IntegerToString(legs) +
            " prevHigh=" + DoubleToString(prevHigh, OCP_Digits()));
    return true;
 }
 
-bool OCP_PlaceOrMoveBuyAtHigh(const double latestHigh, const double prevLow)
+bool OCP_PlaceOrMoveBuyStop(const double latestHigh, const double prevLow)
 {
-   if(!InpAllowBuy || !OCP_TradeOk()) return false;
+   if(!InpAllowBuy || !OCP_TradeAllowed())
+      return false;
 
    const double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
    const double gap = OCP_PendingGap();
-   double price = OCP_NormPrice(latestHigh);
-   const double minBuy = OCP_NormPrice(ask + MathMax(gap, OCP_StopsDist() + OCP_Point()));
-   if(price < minBuy)
-      price = minBuy;
 
-   const double emerg = MathMax(OCP_EmergencyDist(), OCP_StopsDist() + 2.0 * OCP_Point());
-   double sl = OCP_NormPrice(price - emerg);
+   double price = OCP_NormPrice(latestHigh);
+   const double minValidBuy = OCP_NormPrice(ask + MathMax(gap, OCP_StopsDistance() + OCP_Point()));
+   if(price < minValidBuy)
+      price = minValidBuy;
+
+   const double emergency = MathMax(OCP_EmergencyDistance(), OCP_StopsDistance() + 2.0 * OCP_Point());
+   double sl = OCP_NormPrice(price - emergency);
    if(prevLow > 0.0)
       sl = OCP_NormPrice(MathMin(sl, prevLow - gap));
 
    const int allowed = OCP_AllowedEntries();
-   const int openN = OCP_CountPositions();
-   const int pendN = OCP_CountPendings(ORDER_TYPE_BUY_STOP);
-   const int room = allowed - openN;
-   if(room <= 0) return false;
+   const int openCount = OCP_CountPositions();
+   const int room = allowed - openCount;
+   if(room <= 0)
+      return false;
 
-   ENUM_ORDER_TYPE_FILLING fill;
-   OCP_SelectFilling(fill);
-   trade.SetExpertMagicNumber(InpMagic);
-   trade.SetDeviationInPoints(InpSlippagePoints);
-   trade.SetTypeFilling(fill);
+   OCP_PrepareTrade();
 
-   ulong ticket = 0;
-   double oldPrice = 0.0;
-   if(OCP_FindPending(ORDER_TYPE_BUY_STOP, ticket, oldPrice))
+   ulong  pendingTicket = 0;
+   double pendingPrice  = 0.0;
+   if(OCP_FindPending(ORDER_TYPE_BUY_STOP, pendingTicket, pendingPrice))
    {
-      // one-way: only move pending UP to newer high
-      if(price > oldPrice + OCP_Point() * 0.5)
+      // One-way only: move pending up when new high forms
+      if(price > pendingPrice + (OCP_Point() * 0.5))
       {
-         if(!trade.OrderModify(ticket, price, sl, 0.0, 0))
-            OCP_Log("BuyStop modify fail " + IntegerToString((int)trade.ResultRetcode()));
+         if(!g_trade.OrderModify(pendingTicket, price, sl, 0.0, ORDER_TIME_GTC, 0))
+            OCP_Log("BuyStop modify failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()));
          else
-            OCP_Log("BUY pending trail high -> " + DoubleToString(price, OCP_Digits()));
+            OCP_Log("BUY pending moved to high " + DoubleToString(price, OCP_Digits()));
       }
       return true;
    }
 
-   if(pendN > 0) return true;
+   if(OCP_CountPendingsByType(ORDER_TYPE_BUY_STOP) > 0)
+      return true;
 
-   const int legs = MathMin(room, (openN == 0 ? MathMin(3, allowed) : 1));
+   int legs = room;
+   if(openCount == 0)
+      legs = MathMin(room, MathMin(3, allowed));
+   else
+      legs = 1;
+
    const double baseLot = OCP_CalcLot(ORDER_TYPE_BUY, price);
-   if(baseLot <= 0.0) return false;
-   if(g_cycle_lot <= 0.0) g_cycle_lot = baseLot;
-   const double lot = OCP_NormVol(baseLot * legs);
+   if(baseLot <= 0.0)
+      return false;
+   if(g_cycle_lot <= 0.0)
+      g_cycle_lot = baseLot;
 
-   if(!trade.BuyStop(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, "OCP-BUY"))
+   const double lot = OCP_NormVolume(baseLot * (double)legs);
+   if(!g_trade.BuyStop(lot, price, g_symbol, sl, 0.0, ORDER_TIME_GTC, 0, "OCP-BUY"))
    {
-      OCP_Log("BuyStop place fail " + IntegerToString((int)trade.ResultRetcode()) +
-              " " + trade.ResultRetcodeDescription());
+      OCP_Log("BuyStop place failed retcode=" + IntegerToString((int)g_trade.ResultRetcode()) +
+              " " + g_trade.ResultRetcodeDescription());
       return false;
    }
-   OCP_Log("BUY pending @ high " + DoubleToString(price, OCP_Digits()) +
-           " lot=" + DoubleToString(lot, 2) + " (legs=" + IntegerToString(legs) + ")" +
+
+   OCP_Log("BUY pending @ " + DoubleToString(price, OCP_Digits()) +
+           " lot=" + DoubleToString(lot, 2) +
+           " legs=" + IntegerToString(legs) +
            " prevLow=" + DoubleToString(prevLow, OCP_Digits()));
    return true;
 }
@@ -515,129 +633,151 @@ bool OCP_PlaceOrMoveBuyAtHigh(const double latestHigh, const double prevLow)
 //======================================================================
 // TRAIL + EMERGENCY SL
 //======================================================================
-void OCP_ManageTrailAndSL()
+void OCP_ManageOpenPositions()
 {
-   const double trail = OCP_TrailDist();
-   const double emerg = MathMax(OCP_EmergencyDist(), OCP_StopsDist() + 2.0 * OCP_Point());
+   const double trail = OCP_TrailDistance();
+   const double emergency = MathMax(OCP_EmergencyDistance(), OCP_StopsDistance() + 2.0 * OCP_Point());
    const double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
    const double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
+   const double stopLevel = OCP_StopsDistance();
+
+   OCP_PrepareTrade();
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       const ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != g_symbol) continue;
-      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      if(ticket == 0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != g_symbol)
+         continue;
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
 
-      const long type = PositionGetInteger(POSITION_TYPE);
-      const double open = PositionGetDouble(POSITION_PRICE_OPEN);
-      double sl = PositionGetDouble(POSITION_SL);
-      const double tp = PositionGetDouble(POSITION_TP);
+      const long   posType = PositionGetInteger(POSITION_TYPE);
+      const double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      const double curSL = PositionGetDouble(POSITION_SL);
+      const double curTP = PositionGetDouble(POSITION_TP);
 
-      if(type == POSITION_TYPE_SELL)
+      if(posType == POSITION_TYPE_SELL)
       {
-         // Ensure emergency SL exists above entry
-         if(sl <= 0.0)
-            sl = OCP_NormPrice(open + emerg);
+         double workSL = curSL;
+         if(workSL <= 0.0)
+            workSL = OCP_NormPrice(openPrice + emergency);
 
-         // Trail: if price went to 4399, SL -> 4399.5 (price + trail)
-         if(bid < open) // in profit for sell
+         // In profit for sell when bid < open. Example: bid=4399 -> SL=4399.5
+         if(bid < openPrice)
          {
             const double newSL = OCP_NormPrice(bid + trail);
-            // only tighten (move down for sell SL)
-            if(newSL < sl - OCP_Point() * 0.1 || sl <= 0.0)
+            if(newSL < workSL - (OCP_Point() * 0.1))
             {
-               if(newSL > bid + OCP_StopsDist())
+               if(newSL > bid + stopLevel)
                {
-                  if(trade.PositionModify(ticket, newSL, tp))
-                     OCP_Log("SELL trail SL -> " + DoubleToString(newSL, OCP_Digits()) +
-                             " (bid=" + DoubleToString(bid, OCP_Digits()) + ")");
+                  if(g_trade.PositionModify(ticket, newSL, curTP))
+                     OCP_Log("SELL trail SL -> " + DoubleToString(newSL, OCP_Digits()));
                }
             }
          }
-         else if(sl <= 0.0)
+         else if(curSL <= 0.0)
          {
-            trade.PositionModify(ticket, OCP_NormPrice(open + emerg), tp);
+            g_trade.PositionModify(ticket, OCP_NormPrice(openPrice + emergency), curTP);
          }
       }
-      else if(type == POSITION_TYPE_BUY)
+      else if(posType == POSITION_TYPE_BUY)
       {
-         if(sl <= 0.0)
-            sl = OCP_NormPrice(open - emerg);
+         double workSL = curSL;
+         if(workSL <= 0.0)
+            workSL = OCP_NormPrice(openPrice - emergency);
 
-         if(ask > open) // in profit for buy
+         if(ask > openPrice)
          {
             const double newSL = OCP_NormPrice(ask - trail);
-            if(newSL > sl + OCP_Point() * 0.1 || sl <= 0.0)
+            if(newSL > workSL + (OCP_Point() * 0.1))
             {
-               if(newSL < ask - OCP_StopsDist())
+               if(newSL < ask - stopLevel)
                {
-                  if(trade.PositionModify(ticket, newSL, tp))
-                     OCP_Log("BUY trail SL -> " + DoubleToString(newSL, OCP_Digits()) +
-                             " (ask=" + DoubleToString(ask, OCP_Digits()) + ")");
+                  if(g_trade.PositionModify(ticket, newSL, curTP))
+                     OCP_Log("BUY trail SL -> " + DoubleToString(newSL, OCP_Digits()));
                }
             }
          }
-         else if(sl <= 0.0)
+         else if(curSL <= 0.0)
          {
-            trade.PositionModify(ticket, OCP_NormPrice(open - emerg), tp);
+            g_trade.PositionModify(ticket, OCP_NormPrice(openPrice - emergency), curTP);
          }
       }
    }
 }
 
 //======================================================================
-// MAIN LOGIC
+// MAIN FLOW
 //======================================================================
-void OCP_OnNewCandle()
+void OCP_OnNewBar()
 {
    g_profit_lock = false;
-   g_cycle_lot = 0.0;
+   g_cycle_lot   = 0.0;
    OCP_DeletePendings(true, true);
-   OCP_Log("New candle -> reset cooldown/pendings");
+   OCP_Log("New candle -> reset profit-lock and pendings");
 }
 
-void OCP_UpdateMonitor(const ENUM_OCP_COLOR color, const double open0, const double high0, const double low0,
-                       const double prevHigh, const double prevLow)
+void OCP_UpdateComment(const ENUM_OCP_COLOR color,
+                       const double open0,
+                       const double high0,
+                       const double low0,
+                       const double prevHigh,
+                       const double prevLow)
 {
-   const string cname = (color == OCP_RED ? "RED/SELL" : (color == OCP_GREEN ? "GREEN/BUY" : "FLAT"));
+   string colorName = "FLAT";
+   if(color == OCP_COLOR_RED)
+      colorName = "RED / SELL";
+   else if(color == OCP_COLOR_GREEN)
+      colorName = "GREEN / BUY";
+
    Comment(
-      "OpenColorPending v1.00\n",
-      "Symbol: ", g_symbol, "\n",
-      "Open: ", DoubleToString(open0, OCP_Digits()), " | Color: ", cname, "\n",
-      "Curr H/L: ", DoubleToString(high0, OCP_Digits()), " / ", DoubleToString(low0, OCP_Digits()), "\n",
-      "Prev H/L: ", DoubleToString(prevHigh, OCP_Digits()), " / ", DoubleToString(prevLow, OCP_Digits()), "\n",
-      "Entries: ", IntegerToString(OCP_CountPositions()), "/", IntegerToString(OCP_AllowedEntries()),
-      " pend=", IntegerToString(OCP_CountPendings()), "\n",
-      "LotCycle: ", (g_cycle_lot > 0.0 ? DoubleToString(g_cycle_lot, 2) : "-"),
-      " | Trail: ", DoubleToString(OCP_TrailDist(), OCP_Digits()), "\n",
-      "ProfitLockThisCandle: ", (g_profit_lock ? "YES (wait next candle)" : "NO")
+      "OpenColorPending v1.10\n",
+      "Symbol: ", g_symbol, (g_is_gold ? " (XAUUSD)" : " (US30)"), "\n",
+      "Open: ", DoubleToString(open0, OCP_Digits()), " | Color: ", colorName, "\n",
+      "Current H/L: ", DoubleToString(high0, OCP_Digits()), " / ", DoubleToString(low0, OCP_Digits()), "\n",
+      "Previous H/L: ", DoubleToString(prevHigh, OCP_Digits()), " / ", DoubleToString(prevLow, OCP_Digits()), "\n",
+      "Positions: ", IntegerToString(OCP_CountPositions()),
+      " / Allowed: ", IntegerToString(OCP_AllowedEntries()),
+      " | Pendings: ", IntegerToString(OCP_CountAllPendings()), "\n",
+      "CycleLot: ", (g_cycle_lot > 0.0 ? DoubleToString(g_cycle_lot, 2) : "-"),
+      " | Trail: ", DoubleToString(OCP_TrailDistance(), OCP_Digits()), "\n",
+      "ProfitLock: ", (g_profit_lock ? "YES (wait next candle)" : "NO")
    );
 }
 
 void OCP_OnTickLogic()
 {
-   datetime t0, t1;
-   double o0, h0, l0, c0;
-   double o1, h1, l1, c1;
-   if(!OCP_GetCandle(0, t0, o0, h0, l0, c0)) return;
-   if(!OCP_GetCandle(1, t1, o1, h1, l1, c1)) return;
+   datetime time0 = 0;
+   datetime time1 = 0;
+   double open0 = 0.0, high0 = 0.0, low0 = 0.0;
+   double open1 = 0.0, high1 = 0.0, low1 = 0.0;
 
-   // Previous candle high/low always detected
-   const double prevHigh = h1;
-   const double prevLow  = l1;
+   if(!OCP_CopyBar(0, time0, open0, high0, low0))
+      return;
+   if(!OCP_CopyBar(1, time1, open1, high1, low1))
+      return;
 
-   if(t0 != g_candle_time)
+   // previous candle high/low always available
+   const double prevHigh = high1;
+   const double prevLow  = low1;
+   // open1 kept for clarity/future; silence unused by using in comment path only when needed
+   if(open1 <= 0.0 && time1 <= 0)
+      return;
+
+   if(time0 != g_bar_time)
    {
-      g_candle_time = t0;
-      OCP_OnNewCandle();
+      g_bar_time = time0;
+      OCP_OnNewBar();
    }
 
-   OCP_ManageTrailAndSL();
+   OCP_ManageOpenPositions();
 
-   // If already locked after profit this candle: no new pendings
-   const ENUM_OCP_COLOR color = OCP_ColorFromOpen(o0);
-   OCP_UpdateMonitor(color, o0, h0, l0, prevHigh, prevLow);
+   const ENUM_OCP_COLOR color = OCP_DetectColor(open0);
+   OCP_UpdateComment(color, open0, high0, low0, prevHigh, prevLow);
 
    if(g_profit_lock)
    {
@@ -645,21 +785,17 @@ void OCP_OnTickLogic()
       return;
    }
 
-   // If we are in profit floating heavily and closed? handled on deal. 
-   // Color rules:
-   // RED  -> SELL only (delete buys)
-   // GREEN-> BUY only (delete sells)
-   // FLAT -> delete both, wait
-   if(color == OCP_RED)
+   if(color == OCP_COLOR_RED)
    {
-      OCP_DeletePendings(true, false); // no buy pending on red
-      // latest low of CURRENT candle
-      OCP_PlaceOrMoveSellAtLow(l0, prevHigh);
+      // Red candle: SELL only
+      OCP_DeletePendings(true, false);
+      OCP_PlaceOrMoveSellStop(low0, prevHigh);
    }
-   else if(color == OCP_GREEN)
+   else if(color == OCP_COLOR_GREEN)
    {
-      OCP_DeletePendings(false, true); // no sell pending on green
-      OCP_PlaceOrMoveBuyAtHigh(h0, prevLow);
+      // Green candle: BUY only
+      OCP_DeletePendings(false, true);
+      OCP_PlaceOrMoveBuyStop(high0, prevLow);
    }
    else
    {
@@ -667,61 +803,62 @@ void OCP_OnTickLogic()
    }
 }
 
-//======================================================================
-// PROFIT COOLDOWN (after profitable close -> wait new candle)
-//======================================================================
-void OCP_OnDeal(const ulong deal)
+void OCP_HandleClosedDeal(const ulong dealTicket)
 {
-   if(!HistoryDealSelect(deal)) return;
-   if(HistoryDealGetString(deal, DEAL_SYMBOL) != g_symbol) return;
-   if((long)HistoryDealGetInteger(deal, DEAL_MAGIC) != InpMagic) return;
+   if(!HistoryDealSelect(dealTicket))
+      return;
+   if(HistoryDealGetString(dealTicket, DEAL_SYMBOL) != g_symbol)
+      return;
+   if((long)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != InpMagic)
+      return;
 
-   const long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
-   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) return;
+   const long entry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
+      return;
 
-   const double pnl = HistoryDealGetDouble(deal, DEAL_PROFIT) +
-                      HistoryDealGetDouble(deal, DEAL_SWAP) +
-                      HistoryDealGetDouble(deal, DEAL_COMMISSION);
+   const double pnl = HistoryDealGetDouble(dealTicket, DEAL_PROFIT) +
+                      HistoryDealGetDouble(dealTicket, DEAL_SWAP) +
+                      HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
 
    if(pnl > 0.0)
    {
       g_profit_lock = true;
       OCP_DeletePendings(true, true);
-      OCP_Log("PROFIT lock this candle (pnl=" + DoubleToString(pnl, 2) + ") -> wait next candle");
+      OCP_Log("Profit lock ON (pnl=" + DoubleToString(pnl, 2) + "). Wait next candle.");
    }
 }
 
+//======================================================================
+// EVENTS
 //======================================================================
 int OnInit()
 {
    if(!OCP_ValidateSymbol())
       return INIT_FAILED;
 
-   trade.SetExpertMagicNumber(InpMagic);
-   trade.SetDeviationInPoints(InpSlippagePoints);
-   ENUM_ORDER_TYPE_FILLING fill;
-   OCP_SelectFilling(fill);
-   trade.SetTypeFilling(fill);
+   OCP_PrepareTrade();
 
-   g_candle_time = 0;
+   g_bar_time    = 0;
    g_profit_lock = false;
-   g_cycle_lot = 0.0;
+   g_cycle_lot   = 0.0;
+   g_last_log    = "";
 
-   OCP_Log("Init OK OpenColorPending | dynamic lot/entries kept | trail=" +
-           DoubleToString(OCP_TrailDist(), OCP_Digits()) +
-           " | maxEntries=" + IntegerToString(OCP_MAX_ENTRIES));
+   OCP_Log("Init OK v1.10 | trail=" + DoubleToString(OCP_TrailDistance(), OCP_Digits()) +
+           " | maxEntries=" + IntegerToString(OCP_MAX_ENTRIES) +
+           " | symbol=" + g_symbol);
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
    Comment("");
-   OCP_Log("Deinit " + IntegerToString(reason));
+   OCP_Log("Deinit reason=" + IntegerToString(reason));
 }
 
 void OnTick()
 {
-   if(!g_ok) return;
+   if(!g_ready)
+      return;
    OCP_OnTickLogic();
 }
 
@@ -729,16 +866,22 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
-   if(request.volume < 0.0 || result.retcode == 0)
-   {
-      // touch params (no unused warnings)
-   }
-   if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal == 0) return;
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
+      return;
+   if(trans.deal == 0)
+      return;
+
+   // Reference request/result to avoid unused-parameter warnings
+   if(request.magic != InpMagic && request.magic != 0 && result.deal != 0 && result.deal != trans.deal)
+      return;
+
    if(!HistoryDealSelect(trans.deal))
    {
       HistorySelect(TimeCurrent() - 86400, TimeCurrent() + 60);
-      if(!HistoryDealSelect(trans.deal)) return;
+      if(!HistoryDealSelect(trans.deal))
+         return;
    }
-   OCP_OnDeal(trans.deal);
+
+   OCP_HandleClosedDeal(trans.deal);
 }
 //+------------------------------------------------------------------+
