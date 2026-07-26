@@ -1,65 +1,69 @@
-# EA_PulsePAScalper v1.00 — Pure Price-Action Scalper
+# EA_PulsePAScalper v1.01 — M1 Pure Price-Action Scalper
 
 ```
 MQL5/Experts/EA_PulsePAScalper.mq5
 ```
 
-Walang indicator. Pure OHLC price action lang.
+Walang indicator. Pure OHLC price action. **Defaults tuned for M1 + NY session.**
 
-## Ano ang strategy
+## Strategy
 
 **Micro-range break + impulse candle**
 
-1. Kunin ang high/low ng last `N` closed candles (default 4) → micro-range  
-2. Hintayin ang **signal candle** (bar 1 / last closed) na:
-   - **Break + close** beyond the range (with small buffer)
-   - Strong body (`body / range >= 55%` default)
-   - Minimum candle size (points)
-   - Close near the break side (outer 35%)
-3. Enter market on the **next new bar**
-4. SL beyond structure (range extreme / signal wick + buffer)
-5. TP = SL distance × R:R (default **1.5**)
-6. Optional: break-even lock + time exit (scalp hold cap)
+1. Micro-range = last `6` closed M1 candles (~6 minutes)  
+2. Signal candle must **break + close** beyond range, with:
+   - body/range >= `50%`
+   - min size `50` points (raise for noisy XAU/US30)
+   - close near break extreme
+3. Market entry on next new M1 bar  
+4. SL beyond structure + buffer  
+5. TP = SL × `1.2` R:R  
+6. Break-even + max hold `8 minutes`
 
-BUY and SELL both supported. Masipag siya kapag maraming clean breaks, pero **tahimik** kapag walang quality signal.
+## M1 default settings
 
-## Defaults (scalping-friendly)
-
-| Setting | Default | Notes |
+| Input | Value | Why |
 |---|---|---|
-| Chart TF | M1 or M5 | I-attach sa preferred scalp TF |
-| Range bars | 4 | Tighter = more signals |
-| Body ratio | 0.55 | Higher = stricter / fewer trades |
-| Risk / trade | 0.5% | Keep small for active scalping |
-| Max daily loss | 3% | Auto-pause new entries |
-| Cooldown | 45s | After a close |
-| Session | 08:00–20:00 server | Turn off filter for 24h |
-| Max trades/day | 40 | Safety cap |
+| Chart | **M1** | Intended TF |
+| Range bars | 6 | Short scalp context |
+| Body ratio | 0.50 | Active but still filtered |
+| Min candle points | 50 | Start point — calibrate per symbol |
+| Break buffer | 3 pts | Small confirmation |
+| R:R | 1.2 | Faster scalp exits |
+| Max hold | 480s (8m) | Don't turn M1 into swing |
+| Cooldown | 20s | Allows frequent re-entries |
+| Max trades/day | 50 | Cap for busy NY day |
+| Risk / trade | 0.4% | Lower because more entries |
+| Daily loss lock | 3% | Hard pause |
+| Session | 15:00–23:00 server | Approx NY on many GMT+2/3 brokers |
 
-## Risk rules built-in
+**Expected NY-session entries on M1:** roughly **8–20** quality trades (not every minute). Cap = 50/day.
+
+## Session note
+
+`15:00–23:00` assumes broker server ≈ GMT+2/GMT+3.  
+I-check ang server time sa Market Watch → adjust `InpSessionStartHour` / `InpSessionEndHour` kung iba ang broker mo.
+
+## Risk rules
 
 - No martingale / no grid  
 - One position at a time  
-- Spread filter  
-- Daily loss lock  
-- Lot size from risk % (or fixed lot)  
-- TP must beat spread noise  
+- Spread filter + cooldown + daily loss lock  
+- Lot from risk % (or fixed lot)
 
 ## Install (MT5)
 
 1. Copy `EA_PulsePAScalper.mq5` → `MQL5/Experts/`
 2. Compile in MetaEditor
-3. Attach to chart (`XAUUSD` / indices / majors — test first)
+3. Attach on **M1** chart
 4. Enable **Algo Trading**
-5. Start on **demo** and tune `InpMinCandlePoints` per symbol
+5. Demo-test first; tune `InpMinCandlePoints` per symbol
 
-## Quick tune tips
+## Quick tune (M1)
 
-- **Too few trades:** lower `InpMinBodyRatio` (e.g. 0.45), lower `InpMinCandlePoints`, shorter range (`3`)
-- **Too many losers:** raise body ratio / min candle points, tighten session to London+NY only
-- **Gold (XAUUSD):** start `InpMinCandlePoints` around `80–150` on M5 (broker-dependent)
-- **US30 / indices:** usually needs larger point thresholds — demo-calibrate
+- **Too few trades:** `InpMinCandlePoints=30`, `InpMinBodyRatio=0.45`, `InpRangeBars=5`
+- **Too noisy / many losers:** `InpMinCandlePoints=80–120` (XAU), `InpMinBodyRatio=0.55`, tighter session
+- **Gold (XAUUSD):** usually raise min candle points after watching 1–2 demo sessions
+- **US30:** same — calibrate points to your broker digits
 
-## Honest note
-
-Walang EA ang “sure win”. Ito ay rules-based scalper with filters — profitability depends on symbol, broker spread/commission, session, and your risk settings. Always demo-test before live.
+Walang “sure win” EA — always demo before live.

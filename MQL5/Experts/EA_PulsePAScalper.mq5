@@ -5,51 +5,51 @@
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.00"
-#property description "Active scalper: trades only on pure OHLC price-action rules (no indicators)"
+#property version   "1.01"
+#property description "M1-tuned pure price-action scalper (no indicators). Attach on M1."
 #property strict
 
 #include <Trade/Trade.mqh>
 
 //======================================================================
-// Inputs
+// Inputs — defaults tuned for M1 + NY session (broker server time)
 //======================================================================
 input group "=== Strategy (price action only) ==="
-input int    InpRangeBars           = 4;       // Micro-range lookback (closed bars)
-input double InpMinBodyRatio        = 0.55;    // Min body / candle range (impulse quality)
-input double InpMinCandlePoints     = 80;      // Min signal candle size (points)
-input double InpBreakBufferPoints   = 5;       // Extra break beyond range (points)
+input int    InpRangeBars           = 6;       // Micro-range lookback (M1 ≈ 6 min)
+input double InpMinBodyRatio        = 0.50;    // Min body / candle range (impulse quality)
+input double InpMinCandlePoints     = 50;      // Min signal candle size (points) — raise for XAU/US30 if noisy
+input double InpBreakBufferPoints   = 3;       // Extra break beyond range (points)
 input bool   InpRequireCloseNearExt = true;    // Close must be in outer 35% of candle
 input bool   InpAllowBuy            = true;    // Allow BUY breakouts
 input bool   InpAllowSell           = true;    // Allow SELL breakouts
 
 input group "=== Session (broker server time) ==="
 input bool   InpUseSessionFilter    = true;    // Enable session window
-input int    InpSessionStartHour    = 8;       // Start hour (server)
+input int    InpSessionStartHour    = 15;      // NY open ~15:00 on GMT+2/3 brokers
 input int    InpSessionStartMin     = 0;       // Start minute
-input int    InpSessionEndHour      = 20;      // End hour (server)
+input int    InpSessionEndHour      = 23;      // NY afternoon / late session end
 input int    InpSessionEndMin       = 0;       // End minute
 
 input group "=== Exits ==="
-input double InpSLBufferPoints      = 30;      // SL buffer beyond structure (points)
-input double InpRiskReward          = 1.5;     // Take-profit R:R (TP = SL * RR)
+input double InpSLBufferPoints      = 25;      // SL buffer beyond structure (points)
+input double InpRiskReward          = 1.2;     // Scalp R:R (faster TP on M1)
 input bool   InpUseBreakEven        = true;    // Move SL to BE after +BE trigger
-input double InpBETriggerRR         = 0.8;     // BE trigger as fraction of SL distance
-input double InpBELockPoints        = 10;      // Lock profit at BE (points)
+input double InpBETriggerRR         = 0.7;     // BE trigger as fraction of SL distance
+input double InpBELockPoints        = 5;       // Lock profit at BE (points)
 input bool   InpUseTimeExit         = true;    // Force close after max hold
-input int    InpMaxHoldSeconds      = 900;     // Max hold time (15 min scalp default)
+input int    InpMaxHoldSeconds      = 480;     // Max hold (8 min) — keep M1 trades short
 
 input group "=== Filters / frequency ==="
-input double InpMaxSpreadPoints     = 35;      // Max spread (points), 0 = off
-input int    InpCooldownSeconds     = 45;      // Wait after close before next entry
-input int    InpMaxTradesPerDay     = 40;      // Hard cap (0 = unlimited)
+input double InpMaxSpreadPoints     = 40;      // Max spread (points), 0 = off
+input int    InpCooldownSeconds     = 20;      // Short cooldown so M1 can re-fire
+input int    InpMaxTradesPerDay     = 50;      // Hard cap for active M1 day
 input long   InpMagic               = 26072601;// Magic number
 
 input group "=== Risk ==="
-input double InpRiskPercent         = 0.5;     // Risk % of equity per trade
+input double InpRiskPercent         = 0.4;     // Risk % per trade (lower because more entries)
 input double InpFixedLot            = 0.0;     // Fixed lot (0 = use risk %)
 input double InpMaxDailyLossPct     = 3.0;     // Pause day after this equity drawdown %
-input int    InpSlippagePoints      = 30;      // Max slippage (points)
+input int    InpSlippagePoints      = 40;      // Max slippage (points)
 
 //======================================================================
 // Globals
@@ -487,9 +487,14 @@ int OnInit()
    TimeToStruct(TimeCurrent(), dt);
    g_dayStamp = StringToTime(StringFormat("%04d.%02d.%02d", dt.year, dt.mon, dt.day));
 
-   PrintFormat("PulsePA v1.00 | %s %s | range=%d body>=%.0f%% minPts=%.0f RR=%.2f risk=%.2f%%",
+   if(g_tf != PERIOD_M1)
+      PrintFormat("PulsePA WARNING: defaults are tuned for M1, chart is %s. Attach on M1 for intended behavior.",
+                  EnumToString(g_tf));
+
+   PrintFormat("PulsePA v1.01 M1 | %s %s | range=%d body>=%.0f%% minPts=%.0f RR=%.2f risk=%.2f%% session=%02d:%02d-%02d:%02d",
                g_symbol, EnumToString(g_tf), InpRangeBars, InpMinBodyRatio * 100.0,
-               InpMinCandlePoints, InpRiskReward, InpRiskPercent);
+               InpMinCandlePoints, InpRiskReward, InpRiskPercent,
+               InpSessionStartHour, InpSessionStartMin, InpSessionEndHour, InpSessionEndMin);
    return INIT_SUCCEEDED;
 }
 
