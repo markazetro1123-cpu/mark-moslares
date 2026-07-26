@@ -1,4 +1,4 @@
-# EA_OpenColorPending v1.10 (clean build)
+# EA_OpenColorPending v1.20 (clean build)
 
 ```
 MQL5/Experts/EA_OpenColorPending.mq5
@@ -20,4 +20,9 @@ MQL5/Experts/EA_OpenColorPending.mq5
 - XAUUSD + US30
 
 ## Install
-Copy one file → MetaEditor Compile (expect 0 errors / 0 warnings) → attach chart → Algo Trading ON.
+1. Download the **full** `.mq5` file (do not paste fragments into an old file like `GREENPENDING_2.mq5`)
+2. MetaEditor → Compile → expect **0 errors / 0 warnings**
+3. Attach to XAUUSD or US30 chart → Algo Trading ON
+
+Raw:
+`https://raw.githubusercontent.com/markazetro1123-cpu/mark-moslares/cursor/open-color-pending-b063/MQL5/Experts/EA_OpenColorPending.mq5`
