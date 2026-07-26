@@ -1,37 +1,25 @@
-# EA_BalochPulse — ARCH v2.50 (rules enforced)
-
-File:
+# EA_BalochPulse — COMPLIANCE v2.60
 
 ```
 MQL5/Experts/EA_BalochPulse.mq5
 ```
 
-Must show on chart comment: **`BalochPulse ARCH v2.50`**
+Audit report:
 
-## Locked rules
-| ID | Rule |
-|---|---|
-| R1 | NY–London session only (new entries) |
-| R2 | Hard blackout 20:30–20:40 & 21:30–21:40 |
-| R3 | High-impact USD + FOMC block |
-| R4 | Adaptive tick imbalance (no fixed 30) |
-| R5 | Candle memory agree |
-| R6 | Impulse → pullback → enter |
-| R7 | Risk Manager decides lot + entries |
-| R8 | $30–$50 can open 2–3 when clean |
-| R9 | Max 15 hard cap |
-| R10 | Same-price burst (one shot / one band) |
-| R11 | No martingale |
-| R12 | Smart self-exit main exit |
-| R13 | No spread filter |
-| R14 | XAUUSD + US30 same logic |
-| R15 | Always-on engines + on-chart rule monitor |
+```
+MQL5/Experts/AUDIT_BalochPulse.md
+```
 
-## Minimal inputs
-Magic / Risk% / lots / slippage / buy-sell / session clock / logs
+## Accept only if
+1. Chart shows `BalochPulse COMPLIANCE v2.60`
+2. Journal shows `COMPLIANCE SELF-CHECK PASS v2.60`
+3. Behavior follows R1–R15 in the audit matrix
 
-## Verify
-1. Compile v2.50
-2. Attach chart
-3. Look top-left **Comment** panel (`RuleNow: ...`)
-4. Journal logs start with `R1`…`R12` tags
+## Locked behavior
+Impulse → pullback → same-price burst → Risk Manager sizing/count → smart self-exit  
+Session NY–London + hard blackouts + FOMC detect  
+No spread filter, no martingale, max 15, $30–$50 can open 2–3 when clean  
+XAUUSD + US30 same logic
+
+## Inputs (minimal)
+Magic / Risk% / lot caps / slippage / buy-sell / session clock / logs
