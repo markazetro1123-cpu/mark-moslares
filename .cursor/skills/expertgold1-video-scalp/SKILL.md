@@ -5,50 +5,61 @@ description: Reverse-engineer ExpertGold1 TikTok gold scalping behavior into MT5
 
 # ExpertGold1 Video Scalp Behavior
 
-## Source analyzed
+## Sources analyzed
 
-- Short link: `https://vt.tiktok.com/ZS4nAmwLw/`
-- Resolved: `@expertgold1` / GOLD EXPERT
-- Video id: `7672038352341781781`
-- Duration: ~51s
-- Caption: hashtags only (`#forextrading` …) — no written strategy
-- Audio: music bed (no usable trade commentary)
+Primary + five follow-up links (four unique videos; one duplicate):
 
-**Status:** video behavior profile locked. Active design skill: `limitless-scalp-brain` ($10 MM + Deriv Wall Street 30 + gold).
+| Link | Video ID | Notes |
+| --- | --- | --- |
+| `https://vt.tiktok.com/ZS4nAmwLw/` | `7672038352341781781` | Original ~51s profile |
+| `https://vt.tiktok.com/ZS4nm6uRX/` | `7670930749335358741` | Same as next link |
+| `https://vt.tiktok.com/ZS4nmmHke/` | `7670930749335358741` | Duplicate |
+| `https://vt.tiktok.com/ZS4nmhsx9/` | `7670199496508263700` | SELL stack + Bulk Ops |
+| `https://vt.tiktok.com/ZS4nmvSTH/` | `7668344923409796373` | BUY then SELL flip |
+| `https://vt.tiktok.com/ZS4nmCHPx/` | `7660174167156739349` | 1.60-lot momentum SELL |
+
+Frame matrix: `docs/VIDEO_EVIDENCE_MATRIX.md`.
+
+**Status:** multi-video behavior profile locked. Active design skill: `limitless-scalp-brain` ($10 MM + Deriv Wall Street 30 + gold).
 
 ## Observed behavior (from frames)
 
 ### Setup
 - Platform: **MT5 mobile**
 - Symbol: **XAUUSDm**
-- Chart TF shown: **M5**
-- One-click panel lot: **1.00**
-- No visible classic indicators on chart (price-action / discretionary look)
+- Chart TF shown: **M1 / M5 / M15** (highlights often M15)
+- One-click panel lots: **1.00**, **1.60**, or **2.00** (fixed within a basket)
+- No visible classic indicators on chart (naked price / discretionary mash)
 
-### Market context in clip
-- Huge bullish spike candle (~4308 → ~4360+)
-- Then sharp pullback / chop around ~4346–4351
-- Trader scalps the **post-spike fluctuations**, not the full spike ride only
+### Entry trigger class (confirmed)
+- **Price-movement / impulse mash** — rapid one-click SELL/BUY during live candle fluctuation
+- Not an indicator crossover, not a disclosed pip-step grid
+- Exact human thresholds remain `UNKNOWN`; EA uses deterministic tick windows
+
+### Market context across clips
+- Large intra-candle / multi-candle spikes and rejections on gold
+- Continuation stacks (SELL into falling move) and inferred post-spike fades both appear
+- Trader scalps **active price movement**, not candle-close signals
 
 ### Entry style
 - Opens **many same-direction positions** quickly
-- Each position ≈ **1.00 lot**
 - Entries clustered in a tight price band (layer / stack)
-- Direction flips by session in the clip:
-  - stacked **SELL** into weakness / after rejection
-  - stacked **BUY** into bounce
-- Looks like: feel the micro move → mash same side repeatedly
+- Direction flips between baskets:
+  - stacked **SELL** into weakness / after rejection / with bearish continuation
+  - stacked **BUY** into bounce / rebound
+- Pattern: feel the micro move → mash same side repeatedly
 
 ### Exit style (matches user goal)
 - Uses MT5 **Bulk Operations** menu:
   - Close All Positions
   - **Close Profitable Positions**
-- Behavior target for EA: when basket is green enough → **bulk close**
+- Behavior target for EA: when basket is green enough → **bulk close whole basket**
+- Not every clip shows the final close (some end while still floating profit)
 
-### Risk reality shown in same video
-- Also shows deep floating loss / near margin stress (negative free margin, ~98% margin level)
+### Risk reality shown in videos
+- Deep floating loss / near margin stress (negative free margin; margin levels ~29–98%)
 - Same style that prints big floating profit can also dump hard
-- Treat as **high-risk discretionary aggression**, not a safe template to copy 1:1 with 1.00 lots
+- Treat as **high-risk discretionary aggression**, not a safe template to copy 1:1 with 1.00 lots on $10
 
 ## Translate video → EA rules
 

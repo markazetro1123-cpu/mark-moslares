@@ -1,0 +1,17 @@
+---
+description: Lock ExpertGold1-style entries to price-movement / impulse mash; do not invent indicators or re-ask the trigger
+alwaysApply: true
+---
+
+# Price-Movement Entry Lock
+
+- Entry class is **price movement / micro-impulse** on a naked chart.
+- Do not re-ask what the entry trigger is after multi-video evidence and the
+  user already stated price-movement scalping.
+- Encode Phase 1 with tick windows + direction score ≥75 from
+  `docs/FINAL_BEHAVIOR_SPEC.md`.
+- Do not invent RSI/MA/MACD (or other classic) signal panels as the video clone.
+- Exact human mash thresholds remain unknown — use deterministic qualifiers,
+  not a fake “instinct” formula.
+- Keep TikTok 1.00–2.00 lot spam and negative-free-margin behavior out of
+  $10 defaults.

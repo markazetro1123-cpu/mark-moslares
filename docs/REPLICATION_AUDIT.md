@@ -1,13 +1,18 @@
 # ExpertGold1 Replication Audit
 
-Status: **pre-code audit**
+Status: **pre-code audit, updated after four unique follow-up videos**
 
 ## Audit conclusion
 
-A 100% copy of the video's hidden decision process and profitability is not
-technically verifiable from the supplied 51-second highlight. The clip does not
-contain its entry rules, complete trade history, losing sessions, broker
-execution, or raw ticks.
+A 100% copy of the videos' hidden decision process and profitability is not
+technically verifiable. The original highlight plus five follow-up links provide
+five unique clips because two follow-up links resolve to the same video. The
+footage does not contain complete entry rules, complete trade history, losing
+sessions, broker execution, or raw ticks. Key sections are edited or begin after
+the positions are already open.
+
+The frame-level source map and account-risk observations are recorded in
+`VIDEO_EVIDENCE_MATRIX.md`.
 
 We can target:
 
@@ -20,19 +25,38 @@ We can target:
 
 We must not claim 100% profit fidelity or guaranteed “sureball” entries.
 
-## What the video establishes
+## What the videos establish
 
 | Evidence | Confidence |
 | --- | --- |
-| XAUUSDm shown on MT5 M5 | High |
-| Many clustered 1.00-lot same-direction entries | High |
+| XAUUSDm shown on MT5 mobile using M1/M5/M15 views | High |
+| Entry class is price-movement / impulse mash on a naked chart | High |
+| No classic indicator panels visible across the four unique clips | High |
+| Many clustered same-direction entries using repeated fixed lots per basket | High |
 | Both BUY and SELL baskets appear | High |
 | Bulk Operations menu is used | High |
-| Trading occurs after an extreme price spike | High |
-| Exact trigger for every entry | Unknown |
+| Momentum continuation appears in at least one bearish move | High |
+| Baskets also appear around post-spike reversals | Medium; exact trigger is off-screen |
+| Direction can flip between adjacent baskets | High |
+| Positions can remain open through severe adverse movement | High |
+| Negative free margin and near-stop-out margin levels occur | High |
+| Immediate close at first positive P/L | Contradicted |
+| Trading every micro-spike | Not established |
+| Exact numeric threshold for every mash | Unknown |
 | Stop-loss and daily-loss policy | Unknown |
 | Whether entries are momentum, fade, or both | Partly inferred |
 | Long-term expectancy/profitability | Unknown |
+
+**Entry trigger (user + video alignment):** the trader enters on **price
+movement**, not on a disclosed indicator formula. That class is locked. Exact
+tick cutoffs remain unknown, so Phase 1 uses the deterministic tick-window +
+direction-score rules in `FINAL_BEHAVIOR_SPEC.md`.
+
+The follow-up clips strengthen the evidence for the execution style—rapid entry
+bursts, one-sided baskets, direction flips, and bulk closes. They also weaken the
+claim that this is safe micro-scalping: the recordings show selected large M15
+moves, large profit givebacks, negative free margin, and margin levels as low as
+approximately 29–34%.
 
 ## Missing evidence required for a closer clone
 
@@ -43,6 +67,8 @@ We must not claim 100% profit fidelity or guaranteed “sureball” entries.
 - Raw Deriv tick data and spread at those timestamps.
 - Exact lot progression, stop policy, news/session policy, and manual overrides.
 - At least several weeks of ordinary sessions, not only winning highlights.
+- A continuous recording that starts before the first order and shows every
+  order tap, modification, close, and resulting history without cuts.
 
 Without these, any claimed exact “instinct clone” would be invented.
 
@@ -120,6 +146,8 @@ Without these, any claimed exact “instinct clone” would be invented.
 - Post-news spike chasing while spread/slippage gates are violated.
 - Closing only winners and leaving losing positions behind.
 - Any claim of guaranteed profitability or 100% win rate.
+- Copying the videos' negative-free-margin or near-stop-out behavior.
+- Treating a displayed balance jump as verified live-account performance.
 
 ## Pre-code acceptance gate
 

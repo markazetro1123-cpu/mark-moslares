@@ -78,6 +78,7 @@ def validate_behavior_contract() -> None:
         "Phase 1 entry threshold: **75/100**",
         "For equity below $20, the default is **one layer**",
         "Wall Street 30",
+        "price-movement / impulse mash",
     ):
         require(phrase in text, f"behavior contract missing: {phrase}")
 
@@ -89,8 +90,22 @@ def validate_behavior_contract() -> None:
         "We must not claim 100% profit fidelity",
         "Telemetry and Replay Engine",
         "Pre-code acceptance gate",
+        "price-movement / impulse mash",
     ):
         require(phrase in audit_text, f"replication audit missing: {phrase}")
+
+    matrix = ROOT / "docs" / "VIDEO_EVIDENCE_MATRIX.md"
+    require(matrix.exists(), "video evidence matrix is missing")
+    matrix_text = matrix.read_text(encoding="utf-8")
+    for phrase in (
+        "Entry trigger class",
+        "price-movement / impulse mash",
+        "7670930749335358741",
+    ):
+        require(phrase in matrix_text, f"video evidence matrix missing: {phrase}")
+
+    agent = CURSOR / "agents" / "expertgold1-replicator.md"
+    require(agent.exists(), "expertgold1-replicator subagent is missing")
 
 
 def main() -> None:

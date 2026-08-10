@@ -4,17 +4,22 @@ Status: **behavior frozen for Phase 1; no EA code yet**
 
 ## 1. Evidence boundary
 
-The ExpertGold1 clip proves only that the trader:
+Multi-video ExpertGold1 evidence (`docs/VIDEO_EVIDENCE_MATRIX.md`) proves the
+trader:
 
-- watches XAUUSDm on M5 after a very large spike;
-- opens many same-direction 1.00-lot positions in tight clusters;
-- alternates between BUY and SELL baskets as price changes;
-- uses MT5 bulk operations to close positions; and
-- also experiences severe floating drawdown and margin stress.
+- watches `XAUUSDm` on MT5 mobile (M1/M5/M15 views; M15 common in highlights);
+- enters by **price-movement / impulse mash** on a naked chart (no classic
+  indicators);
+- opens many same-direction fixed-lot positions in tight clusters (1.00 / 1.60 /
+  2.00 lots appear across clips);
+- flips direction between baskets as price regime changes;
+- uses MT5 Bulk Operations (Close Profitable / Close All) for exits; and
+- also experiences severe floating drawdown and negative free margin.
 
-It does **not** reveal a complete entry formula or prove that every micro-spike is
-profitably tradable. Our EA will copy the observable behavior class, not claim to
-copy an unknowable “instinct.”
+It does **not** reveal a complete mathematical entry formula or prove that every
+micro-spike is profitably tradable. Our EA copies the observable behavior class
+(qualified price-movement stack + basket bulk close) with $10-safe money
+management—not TikTok lot spam or an unknowable “instinct.”
 
 ## 2. Final objective
 
