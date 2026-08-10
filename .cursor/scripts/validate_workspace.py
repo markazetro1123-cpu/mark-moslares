@@ -81,6 +81,17 @@ def validate_behavior_contract() -> None:
     ):
         require(phrase in text, f"behavior contract missing: {phrase}")
 
+    audit = ROOT / "docs" / "REPLICATION_AUDIT.md"
+    require(audit.exists(), "replication audit is missing")
+    audit_text = audit.read_text(encoding="utf-8")
+    for phrase in (
+        "100% specification fidelity",
+        "We must not claim 100% profit fidelity",
+        "Telemetry and Replay Engine",
+        "Pre-code acceptance gate",
+    ):
+        require(phrase in audit_text, f"replication audit missing: {phrase}")
+
 
 def main() -> None:
     validate_environment()

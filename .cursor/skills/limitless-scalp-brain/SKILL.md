@@ -12,6 +12,9 @@ before designing or coding. The clip does not prove a hidden entry formula or
 that every micro-spike is profitable. Copy the observed behavior class, then
 apply the finalized measurable rules.
 
+For any “100% clone” or profitability request, run the
+`scalp-replication-audit` skill and enforce `docs/REPLICATION_AUDIT.md`.
+
 ## User mindset (verbatim)
 
 mag eenter sya ng trade scalping sureball entry dapat meron syang malakas na instinc sa bawat price movement kung may price movement pataas daoat makakasabay sya at makakapag scalp pero dapat siguraduhin nyarin na ayun talaga ang direction.. isapa sa dapat na mindset nya is isa syang limitless ang mindset nya is to win.. at meron syang agrresive disipline nadapat sa bawat price movement iisipin ng ea na dapat kumita ako sa bawat movement nito dapat makapag scalp ako.. at dilang sya pang xauusd dapat pwede rin sya sa us 30.. deriv ang broker ko so ang symbol nun is wall street 30
