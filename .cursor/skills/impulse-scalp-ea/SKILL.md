@@ -161,6 +161,11 @@ Frame results as: same **behavior class** (impulse scalp + basket close), valida
 4. Call out risk if requested logic is account-destructive
 5. Prefer demo-first validation steps
 
+## Related skill
+
+- Video behavior profile from ExpertGold1 clip: [expertgold1-video-scalp](../expertgold1-video-scalp/SKILL.md)
+- User parked build for later — keep suggestions ready; implement MQL5 when asked
+
 ## Additional resources
 
 - Module formulas, pseudocode, parameter starting points: [reference.md](reference.md)
