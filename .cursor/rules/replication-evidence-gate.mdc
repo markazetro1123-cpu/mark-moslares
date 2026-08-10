@@ -1,0 +1,27 @@
+---
+description: Evidence gate for claims that the EA exactly copies a video scalper or guarantees profitability
+alwaysApply: true
+---
+
+# Replication Evidence Gate
+
+- Treat `docs/FINAL_BEHAVIOR_SPEC.md` as the behavior contract.
+- Read `docs/REPLICATION_AUDIT.md` before designing or coding the EA.
+- Never claim a video reveals hidden entry logic, trader instinct, or long-term
+  profitability when it does not.
+- “100% compliant” means every approved deterministic rule is implemented and
+  tested; it never means guaranteed profits or identical future trades.
+- Keep observed facts, assumptions, unknowns, and our safety modifications
+  explicitly separated.
+- No full EA implementation until the pre-code acceptance gate is approved.
+- Every decision engine must emit testable reason codes and telemetry.
+- Any feature not supported by evidence starts disabled.
+- RiskGovernor may always veto an otherwise valid signal.
+- For $10 equity, skip trades whose broker-minimum volume exceeds the risk budget.
+
+## Forbidden shortcuts
+
+- Do not invent a secret indicator or call arbitrary thresholds “instinct.”
+- Do not use martingale, recovery grids, unlimited layers, or add to losers.
+- Do not optimize on a single highlight/session and call it profitable.
+- Do not hide losing scenarios or execution costs in validation reports.

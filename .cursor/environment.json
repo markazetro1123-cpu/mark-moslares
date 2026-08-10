@@ -1,0 +1,4 @@
+{
+  "name": "Limitless Scalp EA",
+  "install": "python3 .cursor/scripts/validate_workspace.py"
+}

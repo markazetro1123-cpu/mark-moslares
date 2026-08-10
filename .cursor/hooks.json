@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": ".cursor/hooks/ea-session-context.sh"
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": ".cursor/hooks/ea-risk-lint.sh",
+        "matcher": "Write|TabWrite"
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": ".cursor/hooks/ea-prompt-guard.sh",
+        "matcher": "UserPromptSubmit"
+      }
+    ]
+  }
+}

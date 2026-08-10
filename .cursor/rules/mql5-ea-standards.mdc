@@ -1,0 +1,41 @@
+---
+description: MQL5 EA coding standards for the limitless impulse-scalp bot
+globs: "**/*.{mq5,mqh}"
+alwaysApply: false
+---
+
+# MQL5 EA Standards
+
+## Structure
+
+- Split modules: ImpulseDetector, DirectionFilter, EntryEngine, BasketManager, BulkCloseManager, RiskGovernor, MoneyManager
+- Avoid one giant `OnTick` blob
+- Magic number isolates this EA’s trades only
+
+## Money management (required)
+
+```mql5
+// ❌ BAD — video-style spam on tiny account
+double lot = 1.0;
+
+// ✅ GOOD — capital-aware
+double lot = MoneyManagerNormalizeLot(RiskPercentOfEquity(InpRiskPercent));
+if(lot < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+  lot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+```
+
+- Read `SYMBOL_VOLUME_MIN/STEP/MAX` from broker (Deriv)
+- Block new entries if margin level / free margin unsafe
+- Cap `MaxLayers` from inputs; default low for $10
+
+## Trade safety
+
+- Spread gate before every entry
+- Same-side basket only (no hedge by default)
+- Bulk close all magic+symbol positions on profit/loss/time-stop
+- Log entry reason + close reason
+
+## Symbols
+
+- Never hardcode only gold; use `_Symbol` + inputs validated in `OnInit`
+- Document Deriv aliases: gold + Wall Street 30 / US30
