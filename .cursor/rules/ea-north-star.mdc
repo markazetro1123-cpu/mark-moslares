@@ -5,22 +5,25 @@ alwaysApply: true
 
 # EA North Star
 
-Build an MT5 scalping EA with video-like behavior (impulse stack + bulk close), but **balanced risk** for small capital.
+The frozen behavior contract is `docs/FINAL_BEHAVIOR_SPEC.md`. Do not write the
+full EA until the user explicitly approves that specification.
 
 ## Mindset to encode (not slogans in UI — rules in code)
 
-- On each confirmed price movement: scalp with the move
-- Confirm direction before entry (no blind mash)
+- Observe every tick, but trade only qualified micro-impulses
+- Confirm direction with score ≥75 before entry (no blind mash)
 - Aggressive discipline: aim to extract profit from valid impulses
 - Win-focused, but never “limitless lots” — limitless means persistent hunting of valid setups under risk caps
 - Bulk close when basket profit hits target
+- “Sureball” is high confidence, never a profit guarantee
 
 ## Capital & money management (default)
 
 - Starting capital assumption: **$10 USD**
 - Prefer **min lot / micro lot**; never copy TikTok 1.00 lots on $10
-- Risk per new layer: about **1%–2%** of equity (tuneable)
-- Max layers: **1–2** on $10; raise only after proven demo
+- Basket risk ceiling: **2% equity**; daily lockout: **5%**
+- Max layers below $20 equity: **1**
+- Skip when broker minimum lot cannot fit the risk budget
 - Basket max loss + daily loss kill switch required
 - No martingale / no unbounded grid
 
@@ -32,11 +35,13 @@ Build an MT5 scalping EA with video-like behavior (impulse stack + bulk close), 
 
 ## Strategy class
 
-- Detect impulse / fluctuation → enter with confirmed direction → optional capped scale-in → **bulk close on profit**
+- Tick window → qualify impulse → direction score → enter → capped add only in profit → bulk close
+- Phase 1 is continuation-only; post-spike fade stays disabled
 - Desktop/VPS only for EA runtime; mobile is monitor-only
 
 ## When coding or advising
 
 - Keep behavior class aligned with ExpertGold1-style stacking + bulk close
-- Always prefer safer sizing than the video
+- Do not claim the video proves a micro-spike formula or sustainable edge
+- Never close winners while orphaning losing EA positions; close the basket
 - Demo-first before live

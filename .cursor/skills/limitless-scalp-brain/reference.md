@@ -8,10 +8,10 @@ Goal: same video **behavior class**, survivable sizing.
 Equity = 10 USD (example)
 
 RiskPercentPerLayer = 1.5%  -> risk_money ~= 0.15 USD
-MaxLayers = 2               -> max concurrent risk budget ~0.30 USD (not additive blindly)
-DailyLossLimit = 1.00 USD   -> 10% day kill (tune; stay strict early)
-BasketProfitMoney = 0.20–0.50 USD (scale with lot)
-BasketMaxLossMoney = 0.40–0.80 USD
+BasketRiskCeiling = 2%      -> total basket risk <= 0.20 USD
+MaxLayers = 1               -> below $20 equity
+DailyLossLimit = 5%         -> 0.50 USD day lockout
+BasketProfit = adaptive     -> must exceed estimated round-trip costs
 MinSecondsBetweenEntries = 2–5
 ```
 
@@ -19,11 +19,11 @@ MinSecondsBetweenEntries = 2–5
 
 ```text
 raw_lot = risk_money / (sl_distance_in_value_per_lot)
-OR if no hard SL distance: use min lot only on $10
+No valid emergency stop distance -> no trade
 
 lot = floor(raw_lot / volume_step) * volume_step
 lot = clamp(lot, volume_min, volume_max)
-if lot < volume_min: skip entry (cannot afford)
+if raw_lot < volume_min: skip entry (do not force minimum)
 ```
 
 On many Deriv CFD symbols, **volume_min may already be the only safe choice** at $10. Prefer skip over forcing oversized risk.
@@ -40,22 +40,30 @@ On many Deriv CFD symbols, **volume_min may already be the only safe choice** at
 
 ```text
 score = 0
-+1 velocity aligned
-+1 body/extreme aligned
-+1 micro-structure break aligned
--2 spread > max
--2 opposing rejection wick
++25 signed velocity
++20 displacement vs spread/volatility
++20 directional efficiency
++15 micro high/low break
++10 tick persistence
++10 M1/M5 context
 
-enter only if score >= 2 and RiskGovernor OK
+apply penalties for spread shock, stale ticks, failed breakout, opposing rejection
+enter only if score >= 75 and RiskGovernor OK
+add only if score >= 80 and basket is not losing
 ```
 
 ## Bulk close priority
 
-1. `BasketProfitMoney` or `BasketProfitPoints`
+1. emergency margin/free-margin protection
 2. `BasketMaxLossMoney`
-3. Margin level abort (e.g. < 200% on tiny accounts — tune to broker)
-4. Time-stop
-5. Fade exit when small green + impulse dead
+3. daily/consecutive-loss lockout
+4. net basket profit target after costs
+5. confirmed opposite impulse
+6. fade exit when small green + impulse dead
+7. time-stop
+
+Close the complete symbol+magic basket. Do not close only winners and leave
+losers orphaned.
 
 ## Deriv symbol checklist (OnInit)
 
@@ -77,6 +85,9 @@ Keep separate input presets:
 PresetGold: ATRMult, VelocityPoints, MaxSpread, ProfitPoints
 PresetUS30: ATRMult, VelocityPoints, MaxSpread, ProfitPoints
 ```
+
+Prefer normalized thresholds derived from tick size, spread, tick value, and
+volatility. Raw Gold point values must not be reused for Wall Street 30.
 
 ## Anti-patterns on $10
 
