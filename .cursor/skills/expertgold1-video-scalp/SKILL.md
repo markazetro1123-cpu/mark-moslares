@@ -14,7 +14,7 @@ description: Reverse-engineer ExpertGold1 TikTok gold scalping behavior into MT5
 - Caption: hashtags only (`#forextrading` …) — no written strategy
 - Audio: music bed (no usable trade commentary)
 
-**Status of prior plan:** keep `impulse-scalp-ea` suggestions for later build. This skill stores **what the video actually shows**.
+**Status:** video behavior profile locked. Active design skill: `limitless-scalp-brain` ($10 MM + Deriv Wall Street 30 + gold).
 
 ## Observed behavior (from frames)
 

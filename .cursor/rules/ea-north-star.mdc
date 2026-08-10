@@ -1,0 +1,42 @@
+---
+description: Limitless impulse-scalp EA product north star — mindset, $10 capital MM, Deriv symbols, video-style strategy with safe risk
+alwaysApply: true
+---
+
+# EA North Star
+
+Build an MT5 scalping EA with video-like behavior (impulse stack + bulk close), but **balanced risk** for small capital.
+
+## Mindset to encode (not slogans in UI — rules in code)
+
+- On each confirmed price movement: scalp with the move
+- Confirm direction before entry (no blind mash)
+- Aggressive discipline: aim to extract profit from valid impulses
+- Win-focused, but never “limitless lots” — limitless means persistent hunting of valid setups under risk caps
+- Bulk close when basket profit hits target
+
+## Capital & money management (default)
+
+- Starting capital assumption: **$10 USD**
+- Prefer **min lot / micro lot**; never copy TikTok 1.00 lots on $10
+- Risk per new layer: about **1%–2%** of equity (tuneable)
+- Max layers: **1–2** on $10; raise only after proven demo
+- Basket max loss + daily loss kill switch required
+- No martingale / no unbounded grid
+
+## Symbols (Deriv)
+
+- Support **XAUUSD** (or broker gold symbol)
+- Support **Wall Street 30** (US30 / Deriv name — make symbol input configurable)
+- One chart symbol per attached EA instance; inputs must work on both
+
+## Strategy class
+
+- Detect impulse / fluctuation → enter with confirmed direction → optional capped scale-in → **bulk close on profit**
+- Desktop/VPS only for EA runtime; mobile is monitor-only
+
+## When coding or advising
+
+- Keep behavior class aligned with ExpertGold1-style stacking + bulk close
+- Always prefer safer sizing than the video
+- Demo-first before live

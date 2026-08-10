@@ -164,7 +164,7 @@ Frame results as: same **behavior class** (impulse scalp + basket close), valida
 ## Related skill
 
 - Video behavior profile from ExpertGold1 clip: [expertgold1-video-scalp](../expertgold1-video-scalp/SKILL.md)
-- User parked build for later — keep suggestions ready; implement MQL5 when asked
+- Design phase active via `limitless-scalp-brain` ($10 capital, Deriv gold + Wall Street 30)
 
 ## Additional resources
 
