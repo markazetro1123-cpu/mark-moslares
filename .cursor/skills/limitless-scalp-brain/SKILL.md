@@ -80,14 +80,18 @@ exhaustion engine and stays disabled.
 
 ## Money management for $10 start
 
-See [reference.md](reference.md) for formulas.
+See [reference.md](reference.md) and
+[`docs/LOT_SIZING_SPEC.md`](../../../docs/LOT_SIZING_SPEC.md) for formulas.
 
 Defaults:
 
 | Knob | $10 start |
 |------|-----------|
+| Risk base | min(current equity, day-start equity) |
+| Planned entry risk | 1.5% equity |
 | Basket risk ceiling | 2% equity |
-| Lot | calculated then normalized; skip if broker minimum is too large |
+| Cost/slippage reserve | 0.5% equity inside the 2% ceiling |
+| Lot | `OrderCalcProfit` risk, rounded down; skip if minimum is too large |
 | Max layers | 1 below $20 equity |
 | Basket profit | adaptive target after estimated costs |
 | Basket max loss | hard cap < daily loss |
@@ -95,8 +99,10 @@ Defaults:
 | Martingale | OFF |
 
 The engine may add a second layer only after equity policy permits it, the first
-position is not losing, and continuation score remains ≥80. Never force minimum
-lot when its stop risk exceeds the budget.
+position is not losing, continuation score remains ≥80, and combined risk stays
+within 2%. Never force minimum lot when its stop risk exceeds the budget. Below
+$20, permit only one account-wide Limitless basket across Gold and Wall Street
+30 chart instances.
 
 ## Symbols (Deriv)
 

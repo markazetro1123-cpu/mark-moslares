@@ -79,8 +79,21 @@ def validate_behavior_contract() -> None:
         "For equity below $20, the default is **one layer**",
         "Wall Street 30",
         "price-movement / impulse mash",
+        "docs/LOT_SIZING_SPEC.md",
     ):
         require(phrase in text, f"behavior contract missing: {phrase}")
+
+    lot_spec = ROOT / "docs" / "LOT_SIZING_SPEC.md"
+    require(lot_spec.exists(), "lot sizing specification is missing")
+    lot_text = lot_spec.read_text(encoding="utf-8")
+    for phrase in (
+        "risk_base = min(current_equity, day_start_equity)",
+        "raw_volume < SYMBOL_VOLUME_MIN",
+        "LOT_MIN_EXCEEDS_RISK",
+        "OrderCalcMargin",
+        "Second layer is impossible below $20",
+    ):
+        require(phrase in lot_text, f"lot sizing specification missing: {phrase}")
 
     audit = ROOT / "docs" / "REPLICATION_AUDIT.md"
     require(audit.exists(), "replication audit is missing")

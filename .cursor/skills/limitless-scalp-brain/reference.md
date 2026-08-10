@@ -4,6 +4,8 @@
 
 Goal: same video **behavior class**, survivable sizing.
 
+Authoritative algorithm: [`docs/LOT_SIZING_SPEC.md`](../../../docs/LOT_SIZING_SPEC.md).
+
 ```text
 Equity = 10 USD (example)
 
@@ -18,23 +20,36 @@ MinSecondsBetweenEntries = 2–5
 ### Lot normalize (MT5)
 
 ```text
-raw_lot = risk_money / (sl_distance_in_value_per_lot)
+risk_base = min(current_equity, day_start_equity)
+
+market_loss_per_lot =
+    abs(OrderCalcProfit(side, symbol, 1.0, entry_price, stop_price))
+total_loss_per_lot =
+    market_loss_per_lot + commission + exit_spread + slippage_buffer
+
+raw_lot = risk_money / total_loss_per_lot
 No valid emergency stop distance -> no trade
 
 lot = floor(raw_lot / volume_step) * volume_step
-lot = clamp(lot, volume_min, volume_max)
 if raw_lot < volume_min: skip entry (do not force minimum)
+if projected basket loss > 2% risk_base: skip entry
 ```
 
 On many Deriv CFD symbols, **volume_min may already be the only safe choice** at $10. Prefer skip over forcing oversized risk.
+
+Use `OrderCalcMargin` separately. A risk-affordable lot may still be rejected
+for insufficient free margin or projected margin level below the safety floor.
 
 ### Layer policy by equity
 
 | Equity | MaxLayers | Notes |
 |--------|-----------|-------|
 | < $20 | 1 | single-shot scalp |
-| $20–$100 | 2 | capped stack |
-| > $100 | 2–3 | still no video-style spam |
+| $20–$100 | 2 | same-size capped stack; total risk ≤2% |
+| > $100 | 2 | still no video-style spam |
+
+Below $20, allow only one account-wide Limitless EA basket so separate Gold and
+Wall Street 30 chart instances cannot each consume a separate 2% risk budget.
 
 ## Sureball confirmation score
 

@@ -147,15 +147,24 @@ Do not use a fixed dollar target until live Deriv symbol specifications are read
 
 ## 9. $10 capital governor
 
-- Risk budget is calculated from equity and a real emergency stop distance.
+- The authoritative algorithm is `docs/LOT_SIZING_SPEC.md`.
+- Use `risk_base = min(current_equity, day_start_equity)` so drawdown reduces
+  size and temporary intraday gains do not increase it.
+- Planned first-entry risk below $20 is **1.5%**; the hard basket ceiling remains
+  **2%**, leaving 0.5% for costs/slippage reserve.
+- Risk budget is calculated from a real broker-side emergency stop distance
+  using `OrderCalcProfit`, not a hardcoded pip value.
 - Read broker `volume_min`, `volume_step`, tick value, tick size, and margin.
-- If the minimum permitted volume exceeds the risk budget, **skip the trade**.
-- Default maximum concurrent layers below $20 equity: **1**.
-- Default basket risk ceiling: **2% equity**.
+- Normalize volume **down** to the step. If raw volume is below minimum,
+  **skip the trade**; never force the broker minimum.
+- Default maximum concurrent layers below $20 equity: **1** and only one
+  Limitless EA basket account-wide.
+- At/above $20, an optional same-size second layer may be enabled only when the
+  combined basket risk remains within 2%.
 - Default daily loss lockout: **5% equity** or 3 consecutive basket losses,
   whichever occurs first.
-- New entries require a safe projected margin level; emergency protection closes
-  and locks out before stop-out territory.
+- New entries require `OrderCalcMargin` validation and a safe projected margin
+  level; emergency protection closes and locks out before stop-out territory.
 
 These percentages are starting design limits, not proof that a $10 account can
 safely trade Gold or Wall Street 30. Broker contract size may make the minimum
