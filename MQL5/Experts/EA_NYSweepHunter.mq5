@@ -133,7 +133,6 @@ bool     g_setup_is_breakout;
 ulong    g_limit_ticket;
 datetime g_limit_bar_time;
 int      g_limit_bars_left;
-int      g_limit_dir;
 
 //======================================================================
 // BASIC HELPERS
@@ -584,7 +583,6 @@ void NSH_CancelPendings()
       g_trade.OrderDelete(ticket);
    }
    g_limit_ticket = 0;
-   g_limit_dir    = 0;
 }
 
 //======================================================================
@@ -830,7 +828,8 @@ bool NSH_DetectSetup()
       g_setup_high = highPrice;
       g_setup_low  = lowPrice;
       g_setup_is_breakout = false;
-      NSH_Log("SELL sweep high=" + DoubleToString(highPrice, NSH_Digits()) +
+      NSH_Log("SELL sweep open=" + DoubleToString(openPrice, NSH_Digits()) +
+              " high=" + DoubleToString(highPrice, NSH_Digits()) +
               " close=" + DoubleToString(closePrice, NSH_Digits()) +
               " rangeHigh=" + DoubleToString(g_range_high, NSH_Digits()));
       return true;
@@ -842,7 +841,8 @@ bool NSH_DetectSetup()
       g_setup_high = highPrice;
       g_setup_low  = lowPrice;
       g_setup_is_breakout = false;
-      NSH_Log("BUY sweep low=" + DoubleToString(lowPrice, NSH_Digits()) +
+      NSH_Log("BUY sweep open=" + DoubleToString(openPrice, NSH_Digits()) +
+              " low=" + DoubleToString(lowPrice, NSH_Digits()) +
               " close=" + DoubleToString(closePrice, NSH_Digits()) +
               " rangeLow=" + DoubleToString(g_range_low, NSH_Digits()));
       return true;
@@ -1050,7 +1050,6 @@ bool NSH_SendLimit(const int dir)
    g_limit_ticket    = g_trade.ResultOrder();
    g_limit_bar_time  = g_bar_time;
    g_limit_bars_left = InpLimitExpireBars;
-   g_limit_dir       = dir;
    NSH_MarkSideUsed(dir);
    NSH_Log((dir > 0 ? "BUY" : "SELL") +
            " limit mid=" + DoubleToString(mid, NSH_Digits()) +
@@ -1065,7 +1064,6 @@ void NSH_AgeLimit()
    if(!OrderSelect(g_limit_ticket))
    {
       g_limit_ticket = 0;
-      g_limit_dir = 0;
       return;
    }
    if(g_bar_time != g_limit_bar_time)
@@ -1220,7 +1218,6 @@ int OnInit()
    g_used_sell_side = false;
    g_used_side_day  = 0;
    g_limit_ticket   = 0;
-   g_limit_dir      = 0;
    NSH_ResetSetup();
 
    if(!NSH_ValidateSymbol())
