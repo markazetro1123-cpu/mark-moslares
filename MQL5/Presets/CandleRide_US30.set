@@ -1,20 +1,17 @@
-; Candle Ride Scalper — US30 / Wall Street 30
+; Candle Ride Scalper v1.10 — US30 / Wall Street 30
 
 InpMagic=260816
 InpMinLot=0.01
-InpMaxLotCap=1.00
+InpMaxLotCap=10.0
 InpSlippagePoints=60
 InpAllowBuy=true
 InpAllowSell=true
 InpOpenBuffer=1.0
-InpMaxEntriesCap=20
-InpMinEntries=2
-InpMidEntries=5
-InpMidEquity=50.0
-InpMaxEquity=800.0
-InpTriggerProfit=2.0
 InpLockProfit=1.0
-InpPullbackLock=true
+InpCooldownCandles=1
 InpEmergencySL=40.0
+InpUseNewsFilter=true
+InpNewsWaitAfterMin=10
+InpFlattenOnNews=true
 InpShowComment=true
 InpPrintLogs=true

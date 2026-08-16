@@ -1,38 +1,39 @@
 //+------------------------------------------------------------------+
 //| EA_CandleRideScalper.mq5                                         |
-//| Candle Ride Scalper v1.00                                        |
+//| Candle Ride Scalper v1.10                                        |
 //|                                                                  |
-//| Ride the current candle vs its OPEN:                             |
-//|   GREEN (price above open + buffer) -> BUY only                  |
-//|   RED   (price below open - buffer) -> SELL only                 |
-//| Color flip closes the opposite side and reverses.                |
-//| Multiple market entries at the same price (not a grid).          |
-//| Auto-close to lock micro profit. No trailing stop.               |
+//| GREEN vs candle open -> BUY only                                 |
+//| RED   vs candle open -> SELL only                                |
+//| Lock 0.2 -> close + skip next 1 candle                           |
+//| Miss lock + color flip -> close and reverse                      |
+//| New candle tick 1 -> close leftovers, reset, may enter           |
+//| Stack at price (not grid). Lot/entries follow equity. Max 10 lot |
+//| No trade on US CPI / NFP / unemployment / rate; enter +10 min    |
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.00"
-#property description "CandleRide v1.00: follow candle color, stack at price, auto-close lock"
+#property version   "1.10"
+#property description "CandleRide v1.10: color follow, lock 0.2, 1-candle cooldown, US news filter"
 
 #include <Trade/Trade.mqh>
 
 //======================================================================
 // CONSTANTS
 //======================================================================
-const int    CRS_FLAT        = 0;
-const int    CRS_GREEN       = 1;
-const int    CRS_RED         = 2;
-const int    CRS_MAX_ENTRIES = 20;
+const int    CRS_FLAT          = 0;
+const int    CRS_GREEN         = 1;
+const int    CRS_RED           = 2;
+const int    CRS_MAX_ENTRIES   = 20;
 const int    CRS_SEND_PER_TICK = 3;
-const string CRS_PREFIX      = "CRS";
+const string CRS_PREFIX        = "CRS";
 
 //======================================================================
 // INPUTS
 //======================================================================
 input group "=== Account / Broker ==="
 input long     InpMagic              = 260816; // Magic number
-input double   InpMinLot             = 0.01;   // Starting lot at $10
-input double   InpMaxLotCap          = 1.00;   // Maximum lot cap
+input double   InpMinLot             = 0.01;   // Lot at $10
+input double   InpMaxLotCap          = 10.0;   // Maximum lot
 input int      InpSlippagePoints     = 40;     // Deviation points
 input bool     InpAllowBuy           = true;   // Allow BUY on green
 input bool     InpAllowSell          = true;   // Allow SELL on red
@@ -40,18 +41,15 @@ input bool     InpAllowSell          = true;   // Allow SELL on red
 input group "=== Candle Color ==="
 input double   InpOpenBuffer         = 0.0;    // Buffer from candle open (0=auto)
 
-input group "=== Stack / Capital ==="
-input int      InpMaxEntriesCap      = 20;     // Hard cap (max 20)
-input int      InpMinEntries         = 2;      // Entries at $10
-input int      InpMidEntries         = 5;      // Entries at $50
-input double   InpMidEquity          = 50.0;   // Equity for mid entries
-input double   InpMaxEquity          = 800.0;  // Equity that reaches max entries
-
-input group "=== Auto Close Lock (no trailing) ==="
-input double   InpTriggerProfit      = 0.0;    // Arm/close when price profit >= this (0=auto)
-input double   InpLockProfit         = 0.0;    // Locked price profit (0=auto)
-input bool     InpPullbackLock       = true;   // true: arm at trigger, auto-close at lock; false: close at trigger
+input group "=== Lock / Cycle ==="
+input double   InpLockProfit         = 0.0;    // Lock price profit (0=auto gold 0.20)
+input int      InpCooldownCandles    = 1;      // Skip this many candles after lock
 input double   InpEmergencySL        = 0.0;    // Emergency SL distance (0=auto)
+
+input group "=== US High Impact News ==="
+input bool     InpUseNewsFilter      = true;   // Block CPI / NFP / unemployment / rates
+input int      InpNewsWaitAfterMin   = 10;     // Minutes after news before next entry
+input bool     InpFlattenOnNews      = true;   // Close all when news window starts
 
 input group "=== Runtime ==="
 input bool     InpShowComment        = true;   // On-chart status
@@ -66,14 +64,18 @@ bool     g_ready;
 bool     g_is_gold;
 bool     g_is_us30;
 string   g_last_log;
+
 datetime g_bar_time;
 double   g_open_price;
 int      g_color;
 int      g_last_entry_color;
-datetime g_skip_until;
+bool     g_lock_closed_this_bar;
+int      g_cooldown_bars;
 
-ulong    g_armed_ticket[CRS_MAX_ENTRIES];
-int      g_armed_count;
+datetime g_news_until;
+string   g_news_name;
+datetime g_news_refresh;
+bool     g_news_flat_done;
 
 //======================================================================
 // BASIC HELPERS
@@ -120,7 +122,7 @@ double CRS_NormVolume(double volume)
    volume = MathFloor(volume / vstep + 1e-12) * vstep;
    if(volume < vmin)
       volume = vmin;
-   if(volume > vmax && vmax > 0.0)
+   if(vmax > 0.0 && volume > vmax)
       volume = vmax;
    if(volume < InpMinLot)
       volume = InpMinLot;
@@ -230,7 +232,7 @@ bool CRS_ValidateSymbol()
 }
 
 //======================================================================
-// AUTO DISTANCES / SIZING
+// LOT / ENTRIES  (locked table B)
 //======================================================================
 double CRS_Buffer()
 {
@@ -239,15 +241,6 @@ double CRS_Buffer()
    if(g_is_us30)
       return 1.0;
    return 0.10;
-}
-
-double CRS_TriggerProfit()
-{
-   if(InpTriggerProfit > 0.0)
-      return InpTriggerProfit;
-   if(g_is_us30)
-      return 2.0;
-   return 0.50;
 }
 
 double CRS_LockProfit()
@@ -268,68 +261,61 @@ double CRS_EmergencyDistance()
    return 5.0;
 }
 
-int CRS_ClampEntries(const int value)
-{
-   int n = value;
-   int cap = InpMaxEntriesCap;
-   if(cap < 1)
-      cap = 1;
-   if(cap > CRS_MAX_ENTRIES)
-      cap = CRS_MAX_ENTRIES;
-   if(n < 1)
-      n = 1;
-   if(n > cap)
-      n = cap;
-   return n;
-}
-
 int CRS_AllowedEntries()
 {
-   const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   const int minN = MathMax(1, InpMinEntries);
-   const int midN = MathMax(minN, InpMidEntries);
-   const int maxN = CRS_ClampEntries(InpMaxEntriesCap);
-   const double midEq = (InpMidEquity > 10.0 ? InpMidEquity : 50.0);
-   const double maxEq = (InpMaxEquity > midEq ? InpMaxEquity : midEq + 1.0);
-
-   int n = minN;
-   if(equity <= 10.0)
-      n = minN;
-   else if(equity <= midEq)
-   {
-      const double t = (equity - 10.0) / (midEq - 10.0);
-      n = (int)MathRound(minN + t * (midN - minN));
-   }
-   else if(equity >= maxEq)
-      n = maxN;
-   else
-   {
-      const double t = (equity - midEq) / (maxEq - midEq);
-      n = (int)MathRound(midN + t * (maxN - midN));
-   }
-   return CRS_ClampEntries(n);
+   const double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   int n = 2;
+   if(eq >= 25.0)
+      n = 3;
+   if(eq >= 50.0)
+      n = 5;
+   if(eq >= 100.0)
+      n = 7;
+   if(eq >= 200.0)
+      n = 10;
+   if(eq >= 400.0)
+      n = 13;
+   if(eq >= 800.0)
+      n = 16;
+   if(eq >= 1500.0)
+      n = 18;
+   if(eq >= 3000.0)
+      n = 20;
+   if(n > CRS_MAX_ENTRIES)
+      n = CRS_MAX_ENTRIES;
+   return n;
 }
 
 double CRS_LotByEquity()
 {
-   const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   const double eq = AccountInfoDouble(ACCOUNT_EQUITY);
    double lot = InpMinLot;
-   if(equity >= 25.0)
-      lot = InpMinLot * 2.0;
-   if(equity >= 50.0)
-      lot = InpMinLot * 3.0;
-   if(equity >= 100.0)
-      lot = InpMinLot * 5.0;
-   if(equity >= 200.0)
-      lot = InpMinLot * 8.0;
-   if(equity >= 400.0)
-      lot = InpMinLot * 12.0;
-   if(equity >= 800.0)
-      lot = InpMinLot * 18.0;
-   if(equity >= 1500.0)
-      lot = InpMinLot * 25.0;
-   if(equity >= 3000.0)
-      lot = InpMinLot * 40.0;
+   if(eq >= 25.0)
+      lot = 0.02;
+   if(eq >= 50.0)
+      lot = 0.03;
+   if(eq >= 100.0)
+      lot = 0.05;
+   if(eq >= 200.0)
+      lot = 0.10;
+   if(eq >= 400.0)
+      lot = 0.20;
+   if(eq >= 800.0)
+      lot = 0.40;
+   if(eq >= 1500.0)
+      lot = 0.80;
+   if(eq >= 3000.0)
+      lot = 1.50;
+   if(eq >= 5000.0)
+      lot = 3.00;
+   if(eq >= 10000.0)
+      lot = 6.00;
+   if(eq >= 20000.0)
+      lot = 10.00;
+   if(lot < InpMinLot)
+      lot = InpMinLot;
+   if(lot > InpMaxLotCap)
+      lot = InpMaxLotCap;
    return lot;
 }
 
@@ -384,9 +370,9 @@ int CRS_CountDir(const int dir)
       const long type = PositionGetInteger(POSITION_TYPE);
       if(dir > 0 && type == POSITION_TYPE_BUY)
          count++;
-      if(dir < 0 && type == POSITION_TYPE_SELL)
+      else if(dir < 0 && type == POSITION_TYPE_SELL)
          count++;
-      if(dir == 0)
+      else if(dir == 0)
          count++;
    }
    return count;
@@ -414,45 +400,6 @@ double CRS_PriceProfit(const long type, const double openPrice)
    return openPrice - ask;
 }
 
-void CRS_ClearArmed()
-{
-   g_armed_count = 0;
-   ArrayInitialize(g_armed_ticket, 0);
-}
-
-bool CRS_IsArmed(const ulong ticket)
-{
-   for(int i = 0; i < g_armed_count; ++i)
-   {
-      if(g_armed_ticket[i] == ticket)
-         return true;
-   }
-   return false;
-}
-
-void CRS_ArmTicket(const ulong ticket)
-{
-   if(CRS_IsArmed(ticket))
-      return;
-   if(g_armed_count >= CRS_MAX_ENTRIES)
-      return;
-   g_armed_ticket[g_armed_count] = ticket;
-   g_armed_count++;
-}
-
-void CRS_DropArmed(const ulong ticket)
-{
-   for(int i = 0; i < g_armed_count; ++i)
-   {
-      if(g_armed_ticket[i] != ticket)
-         continue;
-      g_armed_ticket[i] = g_armed_ticket[g_armed_count - 1];
-      g_armed_ticket[g_armed_count - 1] = 0;
-      g_armed_count--;
-      return;
-   }
-}
-
 bool CRS_CloseTicket(const ulong ticket, const string reason)
 {
    if(!g_trade.PositionClose(ticket))
@@ -461,7 +408,6 @@ bool CRS_CloseTicket(const ulong ticket, const string reason)
               " err=" + IntegerToString(GetLastError()) + " " + reason);
       return false;
    }
-   CRS_DropArmed(ticket);
    return true;
 }
 
@@ -484,6 +430,152 @@ int CRS_CloseDir(const int dir, const string reason)
    if(closed > 0)
       CRS_Log("Closed " + IntegerToString(closed) + " pos: " + reason);
    return closed;
+}
+
+int CRS_CloseAll(const string reason)
+{
+   return CRS_CloseDir(0, reason);
+}
+
+//======================================================================
+// NEWS FILTER  (US CPI / NFP / unemployment / interest rate)
+//======================================================================
+bool CRS_IsWatchedNews(const string name)
+{
+   const string u = CRS_ToUpper(name);
+   if(StringFind(u, "CPI") >= 0)
+      return true;
+   if(StringFind(u, "CONSUMER PRICE") >= 0)
+      return true;
+   if(StringFind(u, "NON-FARM") >= 0 || StringFind(u, "NONFARM") >= 0)
+      return true;
+   if(StringFind(u, "NON FARM") >= 0 || StringFind(u, "NFP") >= 0)
+      return true;
+   if(StringFind(u, "PAYROLL") >= 0)
+      return true;
+   if(StringFind(u, "UNEMPLOYMENT") >= 0)
+      return true;
+   if(StringFind(u, "FEDERAL FUNDS") >= 0)
+      return true;
+   if(StringFind(u, "INTEREST RATE") >= 0)
+      return true;
+   if(StringFind(u, "RATE DECISION") >= 0)
+      return true;
+   if(StringFind(u, "FOMC") >= 0)
+      return true;
+   return false;
+}
+
+int CRS_NyOffsetHours(const datetime gmt)
+{
+   MqlDateTime dt;
+   TimeToStruct(gmt, dt);
+
+   MqlDateTime cursor;
+   ZeroMemory(cursor);
+   cursor.year = dt.year;
+   cursor.mon  = 3;
+   cursor.day  = 1;
+   datetime mar1 = StructToTime(cursor);
+   MqlDateTime m1;
+   TimeToStruct(mar1, m1);
+   const int marFirstSun = (7 - m1.day_of_week) % 7;
+   const datetime dstStart = mar1 + (marFirstSun + 7) * 86400 + 7 * 3600;
+
+   cursor.mon = 11;
+   datetime nov1 = StructToTime(cursor);
+   MqlDateTime n1;
+   TimeToStruct(nov1, n1);
+   const int novFirstSun = (7 - n1.day_of_week) % 7;
+   const datetime dstEnd = nov1 + novFirstSun * 86400 + 6 * 3600;
+
+   if(gmt >= dstStart && gmt < dstEnd)
+      return -4;
+   return -5;
+}
+
+datetime CRS_FirstFridayNfpGmt(const datetime gmt)
+{
+   MqlDateTime dt;
+   TimeToStruct(gmt, dt);
+
+   MqlDateTime cursor;
+   ZeroMemory(cursor);
+   cursor.year = dt.year;
+   cursor.mon  = dt.mon;
+   cursor.day  = 1;
+   datetime monthStart = StructToTime(cursor);
+   MqlDateTime ms;
+   TimeToStruct(monthStart, ms);
+   const int add = (5 - ms.day_of_week + 7) % 7;
+   const datetime firstFriday = monthStart + add * 86400;
+   const int ny = CRS_NyOffsetHours(firstFriday + 12 * 3600);
+   return firstFriday + (8 * 3600 + 30 * 60) - ny * 3600;
+}
+
+void CRS_RefreshNews()
+{
+   if(!InpUseNewsFilter)
+   {
+      g_news_until = 0;
+      g_news_name  = "";
+      return;
+   }
+
+   const datetime now = TimeGMT();
+   if(g_news_refresh != 0 && now - g_news_refresh < 30)
+      return;
+   g_news_refresh = now;
+
+   const int waitSec = MathMax(1, InpNewsWaitAfterMin) * 60;
+   datetime until = 0;
+   string   name  = "";
+
+   MqlCalendarValue values[];
+   const int copied = CalendarValueHistory(values, now - 2 * 3600, now + 6 * 3600, "US", "USD");
+   if(copied > 0)
+   {
+      for(int i = 0; i < copied; ++i)
+      {
+         MqlCalendarEvent ev;
+         if(!CalendarEventById(values[i].event_id, ev))
+            continue;
+         if(ev.importance < CALENDAR_IMPORTANCE_HIGH)
+            continue;
+         if(!CRS_IsWatchedNews(ev.name))
+            continue;
+         const datetime start = values[i].time;
+         const datetime end   = start + waitSec;
+         if(now >= start && now < end && end > until)
+         {
+            until = end;
+            name  = ev.name;
+         }
+      }
+   }
+
+   if(until == 0)
+   {
+      const datetime nfp = CRS_FirstFridayNfpGmt(now);
+      if(now >= nfp && now < nfp + waitSec)
+      {
+         until = nfp + waitSec;
+         name  = "NFP (first Friday fallback)";
+      }
+   }
+
+   g_news_until = until;
+   g_news_name  = name;
+   if(until == 0)
+      g_news_flat_done = false;
+}
+
+bool CRS_InNewsBlackout()
+{
+   if(!InpUseNewsFilter)
+      return false;
+   CRS_RefreshNews();
+   return (g_news_until > 0 && TimeGMT() < g_news_until);
 }
 
 //======================================================================
@@ -524,8 +616,21 @@ string CRS_ColorName(const int colorId)
    return "FLAT";
 }
 
+bool CRS_CanEnter()
+{
+   if(!g_ready || !CRS_TradeAllowed())
+      return false;
+   if(g_lock_closed_this_bar)
+      return false;
+   if(g_cooldown_bars > 0)
+      return false;
+   if(CRS_InNewsBlackout())
+      return false;
+   return true;
+}
+
 //======================================================================
-// ENTRY
+// ENTRY / LOCK / FLIP
 //======================================================================
 bool CRS_SendOne(const int dir)
 {
@@ -568,9 +673,7 @@ bool CRS_SendOne(const int dir)
 
 void CRS_FillStack(const int dir)
 {
-   if(!CRS_TradeAllowed())
-      return;
-   if(TimeCurrent() < g_skip_until)
+   if(!CRS_CanEnter())
       return;
    if(dir > 0 && !InpAllowBuy)
       return;
@@ -592,58 +695,43 @@ void CRS_FillStack(const int dir)
    }
 }
 
-//======================================================================
-// AUTO CLOSE (no trailing)
-//======================================================================
-void CRS_AutoCloseLock()
+void CRS_StartProfitCooldown()
 {
-   const double trigger = CRS_TriggerProfit();
-   const double lock    = CRS_LockProfit();
+   g_lock_closed_this_bar = true;
+   int skip = InpCooldownCandles;
+   if(skip < 0)
+      skip = 0;
+   g_cooldown_bars = skip;
+}
+
+bool CRS_CheckLockClose()
+{
+   const double lock = CRS_LockProfit();
+   bool any = false;
 
    for(int i = PositionsTotal() - 1; i >= 0; --i)
    {
       const ulong ticket = PositionGetTicket(i);
       if(!CRS_IsOurs(ticket))
          continue;
-
       const long   type  = PositionGetInteger(POSITION_TYPE);
       const double openP = PositionGetDouble(POSITION_PRICE_OPEN);
       const double pp    = CRS_PriceProfit(type, openP);
-
-      if(pp >= trigger)
-         CRS_ArmTicket(ticket);
-
-      bool closeNow = false;
-      if(!InpPullbackLock)
-      {
-         if(pp >= trigger)
-            closeNow = true;
-      }
-      else
-      {
-         if(CRS_IsArmed(ticket) && pp <= lock)
-            closeNow = true;
-      }
-
-      if(!closeNow)
+      if(pp < lock)
          continue;
-
-      const string why = (!InpPullbackLock
-                          ? "auto-close trigger"
-                          : "auto-close lock");
-      if(CRS_CloseTicket(ticket, why))
+      if(CRS_CloseTicket(ticket, "lock profit"))
       {
-         CRS_Log(why +
-                 " ticket=" + IntegerToString((long)ticket) +
-                 " move=" + DoubleToString(pp, CRS_Digits()));
-         g_skip_until = TimeCurrent() + 1;
+         any = true;
+         CRS_Log("Lock close move=" + DoubleToString(pp, CRS_Digits()) +
+                 " ticket=" + IntegerToString((long)ticket));
       }
    }
+
+   if(any)
+      CRS_StartProfitCooldown();
+   return any;
 }
 
-//======================================================================
-// DRIVE
-//======================================================================
 void CRS_OnColor(const int colorId)
 {
    if(colorId == CRS_GREEN)
@@ -661,25 +749,53 @@ void CRS_OnColor(const int colorId)
    }
 }
 
+void CRS_OnNewCandle()
+{
+   if(CRS_CountDir(0) > 0)
+      CRS_CloseAll("new candle reset");
+
+   if(g_lock_closed_this_bar)
+      g_lock_closed_this_bar = false;
+   else if(g_cooldown_bars > 0)
+      g_cooldown_bars--;
+
+   g_color = CRS_FLAT;
+   CRS_Log("New candle open=" + DoubleToString(g_open_price, CRS_Digits()) +
+           " cooldown=" + IntegerToString(g_cooldown_bars));
+}
+
+//======================================================================
+// COMMENT
+//======================================================================
 void CRS_UpdateComment()
 {
    if(!InpShowComment)
       return;
 
+   string news = "news: ok";
+   if(CRS_InNewsBlackout())
+      news = "news: BLOCKED until " + TimeToString(g_news_until, TIME_MINUTES) + " GMT (" + g_news_name + ")";
+
+   string cycle = "cycle: LIVE";
+   if(g_lock_closed_this_bar)
+      cycle = "cycle: lock-closed this candle";
+   else if(g_cooldown_bars > 0)
+      cycle = "cycle: cooldown " + IntegerToString(g_cooldown_bars) + " candle";
+
    Comment(
-      "Candle Ride Scalper v1.00\n",
+      "Candle Ride Scalper v1.10\n",
       "symbol: ", g_symbol, "\n",
       "open: ", DoubleToString(g_open_price, CRS_Digits()),
       "  color: ", CRS_ColorName(g_color), "\n",
       "buys: ", IntegerToString(CRS_CountDir(1)),
       "  sells: ", IntegerToString(CRS_CountDir(-1)),
       "  allow: ", IntegerToString(CRS_AllowedEntries()), "\n",
-      "last entry: ", CRS_ColorName(g_last_entry_color), "\n",
       "lot: ", DoubleToString(CRS_LotByEquity(), 2),
       "  equity: ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2), "\n",
-      "trigger: ", DoubleToString(CRS_TriggerProfit(), CRS_Digits()),
-      "  lock: ", DoubleToString(CRS_LockProfit(), CRS_Digits()),
-      (InpPullbackLock ? "  mode: pullback-lock" : "  mode: close-at-trigger"), "\n",
+      "lock: ", DoubleToString(CRS_LockProfit(), CRS_Digits()),
+      "  last entry: ", CRS_ColorName(g_last_entry_color), "\n",
+      cycle, "\n",
+      news, "\n",
       "basket $: ", DoubleToString(CRS_BasketMoney(), 2)
    );
 }
@@ -689,33 +805,37 @@ void CRS_UpdateComment()
 //======================================================================
 int OnInit()
 {
-   g_symbol           = _Symbol;
-   g_ready            = false;
-   g_last_log         = "";
-   g_bar_time         = 0;
-   g_open_price       = 0.0;
-   g_color            = CRS_FLAT;
-   g_last_entry_color = CRS_FLAT;
-   g_skip_until       = 0;
-   CRS_ClearArmed();
+   g_symbol               = _Symbol;
+   g_ready                = false;
+   g_last_log             = "";
+   g_bar_time             = 0;
+   g_open_price           = 0.0;
+   g_color                = CRS_FLAT;
+   g_last_entry_color     = CRS_FLAT;
+   g_lock_closed_this_bar = false;
+   g_cooldown_bars        = 0;
+   g_news_until           = 0;
+   g_news_name            = "";
+   g_news_refresh         = 0;
+   g_news_flat_done       = false;
 
    if(!CRS_ValidateSymbol())
       return INIT_FAILED;
-   if(InpMinEntries < 1)
+   if(InpMaxLotCap < InpMinLot)
    {
-      CRS_Log("InpMinEntries must be >= 1");
+      CRS_Log("InpMaxLotCap must be >= InpMinLot");
       return INIT_FAILED;
    }
-   if(InpMaxEntriesCap < InpMinEntries)
+   if(InpNewsWaitAfterMin < 0)
    {
-      CRS_Log("InpMaxEntriesCap must be >= InpMinEntries");
+      CRS_Log("InpNewsWaitAfterMin must be >= 0");
       return INIT_FAILED;
    }
 
    CRS_PrepareTrade();
    CRS_Log("Ready on " + g_symbol + " TF=" + EnumToString(_Period) +
-           " trigger=" + DoubleToString(CRS_TriggerProfit(), CRS_Digits()) +
-           " lock=" + DoubleToString(CRS_LockProfit(), CRS_Digits()));
+           " lock=" + DoubleToString(CRS_LockProfit(), CRS_Digits()) +
+           " maxLot=" + DoubleToString(InpMaxLotCap, 2));
    return INIT_SUCCEEDED;
 }
 
@@ -730,7 +850,16 @@ void OnTick()
       return;
 
    CRS_PrepareTrade();
-   CRS_AutoCloseLock();
+   CRS_RefreshNews();
+
+   if(CRS_InNewsBlackout())
+   {
+      if(InpFlattenOnNews && !g_news_flat_done && CRS_CountDir(0) > 0)
+      {
+         CRS_CloseAll("news blackout");
+         g_news_flat_done = true;
+      }
+   }
 
    double openPrice = 0.0;
    if(!CRS_ReadOpen(openPrice))
@@ -738,11 +867,18 @@ void OnTick()
    g_open_price = openPrice;
 
    const datetime barTime = iTime(g_symbol, PERIOD_CURRENT, 0);
-   if(barTime > 0 && barTime != g_bar_time)
+   if(barTime > 0 && (g_bar_time == 0 || barTime != g_bar_time))
    {
+      const bool firstTick = (g_bar_time != 0);
       g_bar_time = barTime;
-      g_color    = CRS_FLAT;
-      CRS_Log("New candle open=" + DoubleToString(openPrice, CRS_Digits()));
+      if(firstTick)
+         CRS_OnNewCandle();
+   }
+
+   if(CRS_CheckLockClose())
+   {
+      CRS_UpdateComment();
+      return;
    }
 
    g_color = CRS_DetectColor(openPrice);

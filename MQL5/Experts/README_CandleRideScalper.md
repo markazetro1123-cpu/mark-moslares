@@ -1,63 +1,55 @@
-# EA_CandleRideScalper v1.00
+# EA_CandleRideScalper v1.10
 
 Aggressive candle-follow scalper para sa **XAUUSD / GOLD** at **US30 / Wall Street 30**.
 
-Mindset: **kada galaw ng candle, sumabay**. Green = buy, red = sell. Konting profit, i-lock, auto-close. Walang trailing stop. Walang grid.
+Walang trailing stop. Walang grid.
 
-## Logic
+## Cycle
 
-Current candle vs **OPEN PRICE**:
+1. **Green** vs candle open → **BUY only** (stack sa current price)
+2. **Red** vs candle open → **SELL only**
+3. Nahit ang **lock 0.2** → close, **cooldown 1 candle**, tapos bagong cycle
+4. Hindi na-lock, tapos nag-flip ang kulay → close ang old side, open ang new side
+5. **Unang tick ng next candle** → auto-close lahat ng leftover, reset, **pwede nang mag-entry** sa bagong candle (maliban kung cooldown o news)
 
-- Open `4401`, umakyat at naging **green** → **BUY only**
-- Open `4401`, bumaba at naging **red** → **SELL only**
-- Kung red ang sell, tapos umakyat at naging green → **close sell, BUY**
-- Hindi grid. Market entries sa **current price** lang. Puwedeng maraming position sa iisang price (stack).
+## Lot / entries (equity milestone, max 10 lot)
 
-Buffer mula sa open (default gold `0.10`, US30 `1.0`) para hindi mag-flip sa gitna ng open.
+Tataas lang sa **simula ng cycle**, hindi habang may open trade, hindi per win.
 
-## Auto-close lock (walang trailing)
-
-Example (gold):
-
-1. BUY @ `4401`
-2. Umakyat sa `4401.5` (+0.50) → trigger
-3. Default **`InpPullbackLock=true`**: naka-arm sa `4401.5`, **auto-close** pag dating sa lock `4401.2` (+0.20). Walang trailing — hindi sinusundan pataas ang lock.
-4. Kung `InpPullbackLock=false`: auto-close mismo sa trigger `4401.5`
-
-Defaults:
-
-| | Gold | US30 |
+| Equity | Lot | Entries |
 |---|---|---|
-| Trigger | 0.50 | 2.0 |
-| Lock | 0.20 | 1.0 |
-| Pullback lock | true (arm 0.50, close 0.20) | true |
+| $10–$24 | 0.01 | 2 |
+| $25–$49 | 0.02 | 3 |
+| $50–$99 | 0.03 | 5 |
+| $100–$199 | 0.05 | 7 |
+| $200–$399 | 0.10 | 10 |
+| $400–$799 | 0.20 | 13 |
+| $800–$1,499 | 0.40 | 16 |
+| $1,500–$2,999 | 0.80 | 18 |
+| $3,000–$4,999 | 1.50 | 20 |
+| $5,000–$9,999 | 3.00 | 20 |
+| $10,000–$19,999 | 6.00 | 20 |
+| $20,000+ | **10.00 max** | 20 |
 
-May emergency SL lang para sa spike. Hindi ito trailing.
+## News filter
 
-## Capital → entries at lot
+Bawal mag-trade sa US high-impact:
 
-Starting **$10**, lot `0.01`.
+- CPI
+- NFP / Non-Farm Payrolls
+- Unemployment
+- Interest rate / FOMC / rate decision
 
-| Equity | Entries | Lot (from 0.01) |
-|---|---|---|
-| $10 | 2 | 0.01 |
-| $25 | ~3 | 0.02 |
-| $50 | 5 | 0.03 |
-| mas mataas | hanggang 20 | lumalaki |
+Entry **10 minuto after** ang news. Default: i-flatten ang open trades pag nagsimula ang news window.
 
-`$10–$50` = **2 hanggang 5** entries. Max **20**.
+Ginagamit ang MT5 Economic Calendar (US/USD, high importance). Fallback: first Friday 08:30 New York = NFP.
 
 ## Install
 
 1. Copy `EA_CandleRideScalper.mq5` sa `MQL5/Experts/`
-2. Compile sa MetaEditor (0 errors, 0 warnings)
+2. Compile sa MetaEditor
 3. Attach sa XAUUSD o Wall Street 30 (M1 o M5)
-4. Load preset kung gusto
+4. Load `CandleRide_XAUUSD.set` o `CandleRide_US30.set`
 5. Enable Algo Trading
-
-## Presets
-
-- `MQL5/Presets/CandleRide_XAUUSD.set`
-- `MQL5/Presets/CandleRide_US30.set`
 
 Demo muna. Hindi guarantee ng tubo.

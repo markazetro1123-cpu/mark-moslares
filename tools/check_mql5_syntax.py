@@ -67,7 +67,7 @@ def check(path: Path) -> list[str]:
         errors.append("CTrade is not used")
 
     inputs = re.findall(r"^\s*input\s+", raw, flags=re.M)
-    if len(inputs) < 20:
+    if len(inputs) < 12:
         errors.append(f"too few inputs: {len(inputs)}")
 
     if "InpMagic" not in raw:
