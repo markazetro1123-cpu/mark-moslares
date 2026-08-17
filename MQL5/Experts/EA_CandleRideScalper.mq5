@@ -12,8 +12,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Mark Moslares"
 #property link      "https://github.com/markazetro1123-cpu/mark-moslares"
-#property version   "1.10"
-#property description "CandleRide v1.10: color follow, lock 0.2, 1-candle cooldown, US news filter"
+#property version   "1.11"
+#property description "CandleRide v1.11: market-only, no pending, color follow, lock 0.2"
 
 #include <Trade/Trade.mqh>
 
@@ -137,30 +137,19 @@ double CRS_NormVolume(double volume)
    return NormalizeDouble(volume, digits);
 }
 
-bool CRS_SelectFilling(ENUM_ORDER_TYPE_FILLING &filling)
-{
-   const int modes = (int)SymbolInfoInteger(g_symbol, SYMBOL_FILLING_MODE);
-   if((modes & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
-   {
-      filling = ORDER_FILLING_IOC;
-      return true;
-   }
-   if((modes & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
-   {
-      filling = ORDER_FILLING_FOK;
-      return true;
-   }
-   filling = ORDER_FILLING_RETURN;
-   return true;
-}
-
 void CRS_PrepareTrade()
 {
-   ENUM_ORDER_TYPE_FILLING filling;
-   CRS_SelectFilling(filling);
    g_trade.SetExpertMagicNumber(InpMagic);
    g_trade.SetDeviationInPoints(InpSlippagePoints);
-   g_trade.SetTypeFilling(filling);
+   g_trade.SetAsyncMode(false);
+
+   const int modes = (int)SymbolInfoInteger(g_symbol, SYMBOL_FILLING_MODE);
+   if((modes & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+      g_trade.SetTypeFilling(ORDER_FILLING_IOC);
+   else if((modes & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+      g_trade.SetTypeFilling(ORDER_FILLING_FOK);
+   else
+      g_trade.SetTypeFillingBySymbol(g_symbol);
 }
 
 double CRS_StopsDistance()
@@ -238,9 +227,7 @@ double CRS_Buffer()
 {
    if(InpOpenBuffer > 0.0)
       return InpOpenBuffer;
-   if(g_is_us30)
-      return 1.0;
-   return 0.10;
+   return 0.0;
 }
 
 double CRS_LockProfit()
@@ -435,6 +422,26 @@ int CRS_CloseDir(const int dir, const string reason)
 int CRS_CloseAll(const string reason)
 {
    return CRS_CloseDir(0, reason);
+}
+
+int CRS_KillPendings()
+{
+   int killed = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; --i)
+   {
+      const ulong ticket = OrderGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(OrderGetString(ORDER_SYMBOL) != g_symbol)
+         continue;
+      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic)
+         continue;
+      if(g_trade.OrderDelete(ticket))
+         killed++;
+   }
+   if(killed > 0)
+      CRS_Log("Deleted " + IntegerToString(killed) + " pending (market-only EA)");
+   return killed;
 }
 
 //======================================================================
@@ -632,42 +639,77 @@ bool CRS_CanEnter()
 //======================================================================
 // ENTRY / LOCK / FLIP
 //======================================================================
+void CRS_AttachEmergencySL(const ulong ticket, const int dir)
+{
+   if(ticket == 0 || !PositionSelectByTicket(ticket))
+      return;
+   const double openP = PositionGetDouble(POSITION_PRICE_OPEN);
+   const double dist  = MathMax(CRS_EmergencyDistance(), CRS_StopsDistance() + CRS_Point());
+   double sl = 0.0;
+   if(dir > 0)
+      sl = CRS_NormPrice(openP - dist);
+   else
+      sl = CRS_NormPrice(openP + dist);
+   if(MathAbs(PositionGetDouble(POSITION_SL) - sl) < CRS_Point())
+      return;
+   g_trade.PositionModify(ticket, sl, 0.0);
+}
+
 bool CRS_SendOne(const int dir)
 {
+   CRS_KillPendings();
+
    const double ask = SymbolInfoDouble(g_symbol, SYMBOL_ASK);
    const double bid = SymbolInfoDouble(g_symbol, SYMBOL_BID);
    const double entry = (dir > 0 ? ask : bid);
-   const double dist = MathMax(CRS_EmergencyDistance(), CRS_StopsDistance() + CRS_Point());
-
-   double sl = 0.0;
-   if(dir > 0)
-      sl = CRS_NormPrice(entry - dist);
-   else
-      sl = CRS_NormPrice(entry + dist);
-
    const ENUM_ORDER_TYPE otype = (dir > 0 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
    const double lot = CRS_CalcLot(otype, entry);
    CRS_PrepareTrade();
 
+   // Price 0 = market fill. Never pass ask/bid: that becomes Buy/Sell Limit on RETURN brokers.
    bool sent = false;
    if(dir > 0)
-      sent = g_trade.Buy(lot, g_symbol, ask, sl, 0.0, CRS_PREFIX);
+      sent = g_trade.Buy(lot, g_symbol, 0.0, 0.0, 0.0, CRS_PREFIX);
    else
-      sent = g_trade.Sell(lot, g_symbol, bid, sl, 0.0, CRS_PREFIX);
+      sent = g_trade.Sell(lot, g_symbol, 0.0, 0.0, 0.0, CRS_PREFIX);
+
+   CRS_KillPendings();
 
    if(!sent)
    {
-      CRS_Log("Send failed dir=" + IntegerToString(dir) +
+      CRS_Log("Market send failed dir=" + IntegerToString(dir) +
               " err=" + IntegerToString(GetLastError()) +
               " ret=" + IntegerToString((int)g_trade.ResultRetcode()));
       return false;
    }
 
+   ulong ticket = 0;
+   const ulong resultOrder = g_trade.ResultOrder();
+   if(resultOrder != 0 && PositionSelectByTicket(resultOrder))
+      ticket = resultOrder;
+   else
+   {
+      for(int i = PositionsTotal() - 1; i >= 0; --i)
+      {
+         const ulong t = PositionGetTicket(i);
+         if(!CRS_IsOurs(t))
+            continue;
+         const long type = PositionGetInteger(POSITION_TYPE);
+         if(dir > 0 && type != POSITION_TYPE_BUY)
+            continue;
+         if(dir < 0 && type != POSITION_TYPE_SELL)
+            continue;
+         ticket = t;
+         break;
+      }
+   }
+   if(ticket != 0)
+      CRS_AttachEmergencySL(ticket, dir);
+
    g_last_entry_color = (dir > 0 ? CRS_GREEN : CRS_RED);
    CRS_Log((dir > 0 ? "BUY " : "SELL ") +
-           "lot=" + DoubleToString(lot, 2) +
-           " price=" + DoubleToString(entry, CRS_Digits()) +
-           " sl=" + DoubleToString(sl, CRS_Digits()));
+           "market lot=" + DoubleToString(lot, 2) +
+           " price=" + DoubleToString(entry, CRS_Digits()));
    return true;
 }
 
@@ -783,7 +825,7 @@ void CRS_UpdateComment()
       cycle = "cycle: cooldown " + IntegerToString(g_cooldown_bars) + " candle";
 
    Comment(
-      "Candle Ride Scalper v1.10\n",
+      "Candle Ride Scalper v1.11\n",
       "symbol: ", g_symbol, "\n",
       "open: ", DoubleToString(g_open_price, CRS_Digits()),
       "  color: ", CRS_ColorName(g_color), "\n",
@@ -850,6 +892,7 @@ void OnTick()
       return;
 
    CRS_PrepareTrade();
+   CRS_KillPendings();
    CRS_RefreshNews();
 
    if(CRS_InNewsBlackout())
