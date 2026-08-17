@@ -1,0 +1,17 @@
+; Candle Ride Scalper v1.10 — XAUUSD / GOLD
+
+InpMagic=260816
+InpMinLot=0.01
+InpMaxLotCap=10.0
+InpSlippagePoints=40
+InpAllowBuy=true
+InpAllowSell=true
+InpOpenBuffer=0.10
+InpLockProfit=0.20
+InpCooldownCandles=1
+InpEmergencySL=5.0
+InpUseNewsFilter=true
+InpNewsWaitAfterMin=10
+InpFlattenOnNews=true
+InpShowComment=true
+InpPrintLogs=true
